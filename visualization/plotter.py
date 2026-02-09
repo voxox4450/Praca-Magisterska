@@ -1,8 +1,9 @@
 import matplotlib.pyplot as plt
-import numpy as np
+from typing import List, Tuple
+from environment.grid_map import GridMap
 
 
-def plot_simulation(grid_map, path, title="Simulation"):
+def plot_simulation(grid_map: GridMap, path: List[Tuple[int, int]], title: str="Simulation") -> None:
     plt.figure(figsize=(10, 8))
 
     # Rysowanie siatki ryzyka (cmap='hot_r' da ładne przejście od białego do czerwonego)

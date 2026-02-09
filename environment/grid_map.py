@@ -3,7 +3,7 @@ import random
 
 
 class GridMap:
-    def __init__(self, width, height, risk_zones_count=5):
+    def __init__(self, width: int, height: int, risk_zones_count: int =5) -> None:
         """
         Inicjalizacja mapy.
         :param width: Szerokość siatki (np. 100, 150, 200)
@@ -19,7 +19,7 @@ class GridMap:
         self._generate_obstacles()
         self._generate_risk_zones(risk_zones_count)
 
-    def _generate_obstacles(self):
+    def _generate_obstacles(self) -> None:
         """
         Generuje twarde przeszkody (wartość 1.0 - zakaz lotu).
         Symulacja budynków jako prostokątów.
@@ -35,7 +35,7 @@ class GridMap:
             # Ustawienie 1.0 oznacza fizyczną przeszkodę / No-Fly Zone
             self.grid[x:x + w, y:y + h] = 1.0
 
-    def _generate_risk_zones(self, count):
+    def _generate_risk_zones(self, count: int) -> None:
         """
         Generuje strefy ryzyka (wartości od 0.1 do 0.9).
         Symulacja zakłóceń sygnału (gradient ryzyka).
@@ -74,7 +74,7 @@ class GridMap:
 
             self.grid[mask] = final_values
 
-    def get_cost(self, x, y):
+    def get_cost(self, x: int, y: int) -> float:
         """Zwraca koszt (ryzyko) danej komórki."""
         if 0 <= x < self.width and 0 <= y < self.height:
             return self.grid[x, y]
