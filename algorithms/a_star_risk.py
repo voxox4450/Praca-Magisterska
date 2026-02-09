@@ -6,14 +6,17 @@ from environment.grid_map import GridMap
 from algorithms.common import Node, reconstruct_path
 
 
-def run_astar(
+def run_risk_astar(
         grid_map: GridMap,
         start: Tuple[int, int],
-        goal: Tuple[int, int]
+        goal: Tuple[int, int],
+        risk_weight: float = 20.0,
+        turn_penalty: float = 2.0
 ) -> Tuple[List[Tuple[int, int]], Dict[str, Any]]:
     t0 = time.time()
 
-    start_node = Node(start[0], start[1], 0.0)
+    # Inicjujemy z kierunkiem (0,0)
+    start_node = Node(start[0], start[1], 0.0, direction=(0, 0))
     open_list = []
     heapq.heappush(open_list, start_node)
 
@@ -44,17 +47,29 @@ def run_astar(
 
             if not (0 <= nx < grid_map.width and 0 <= ny < grid_map.height):
                 continue
-            if grid_map.get_cost(nx, ny) >= 1.0:
+
+            cell_risk = grid_map.get_cost(nx, ny)
+            if cell_risk >= 1.0:  # Ściana
                 continue
 
             dist_cost = math.sqrt(dx ** 2 + dy ** 2)
-            new_g = current.cost + dist_cost
+
+            # --- DODATKOWE KOSZTY ---
+            risk_cost = cell_risk * risk_weight
+
+            turn_cost = 0.0
+            # Jeśli zmieniamy wektor ruchu względem rodzica -> kara
+            if current.parent is not None and current.direction != (dx, dy):
+                turn_cost = turn_penalty
+
+            new_g = current.cost + dist_cost + risk_cost + turn_cost
 
             if (nx, ny) not in g_score or new_g < g_score[(nx, ny)]:
                 g_score[(nx, ny)] = new_g
-                # A*: Heurystyka Euklidesowa
                 h = math.sqrt((nx - goal[0]) ** 2 + (ny - goal[1]) ** 2)
-                neighbor = Node(nx, ny, new_g, current, heuristic=h)
+
+                # Zapisujemy direction=(dx, dy) aby w następnym kroku wykryć zakręt
+                neighbor = Node(nx, ny, new_g, current, direction=(dx, dy), heuristic=h)
                 heapq.heappush(open_list, neighbor)
 
     return [], {"found": False, "time": 0, "length": 0, "risk": 0, "turns": 0, "nodes": nodes_expanded}
