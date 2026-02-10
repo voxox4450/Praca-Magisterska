@@ -3,7 +3,7 @@ import time
 import math
 from typing import List, Tuple, Dict, Any
 from environment.grid_map import GridMap
-from algorithms.common import Node, reconstruct_path
+from algorithms.common import Node, reconstruct_path, calculate_dynamic_penalty
 
 
 def run_risk_astar(
@@ -15,7 +15,6 @@ def run_risk_astar(
 ) -> Tuple[List[Tuple[int, int]], Dict[str, Any]]:
     t0 = time.time()
 
-    # Inicjujemy z kierunkiem (0,0)
     start_node = Node(start[0], start[1], 0.0, direction=(0, 0))
     open_list = []
     heapq.heappush(open_list, start_node)
@@ -54,21 +53,31 @@ def run_risk_astar(
 
             dist_cost = math.sqrt(dx ** 2 + dy ** 2)
 
-            # --- DODATKOWE KOSZTY ---
-            risk_cost = cell_risk * risk_weight
+            # 1. Obliczamy karę za pęd (wspólną funkcją)
+            # Uwaga: Dla algorytmu Risk-Aware mnożymy karę pędu przez risk_weight,
+            # żeby suwak miał wpływ na to, jak bardzo boimy się zderzenia.
+            base_momentum_penalty = calculate_dynamic_penalty(
+                grid_map, current.direction, (dx, dy), (nx, ny), braking_distance=4
+            )
 
+            # W tym algorytmie kara za pęd jest skalowana przez wagę ryzyka (jeśli użytkownik ustawił dużą)
+            # lub brana surowa (żeby chociaż omijał ściany)
+            momentum_cost = base_momentum_penalty * (1.0 + risk_weight / 10.0)
+
+            # 2. Koszt statyczny ryzyka (tego pola)
+            static_risk_cost = cell_risk * risk_weight
+
+            # 3. Koszt skrętu
             turn_cost = 0.0
-            # Jeśli zmieniamy wektor ruchu względem rodzica -> kara
             if current.parent is not None and current.direction != (dx, dy):
                 turn_cost = turn_penalty
 
-            new_g = current.cost + dist_cost + risk_cost + turn_cost
+            new_g = current.cost + dist_cost + static_risk_cost + momentum_cost + turn_cost
 
             if (nx, ny) not in g_score or new_g < g_score[(nx, ny)]:
                 g_score[(nx, ny)] = new_g
                 h = math.sqrt((nx - goal[0]) ** 2 + (ny - goal[1]) ** 2)
 
-                # Zapisujemy direction=(dx, dy) aby w następnym kroku wykryć zakręt
                 neighbor = Node(nx, ny, new_g, current, direction=(dx, dy), heuristic=h)
                 heapq.heappush(open_list, neighbor)
 

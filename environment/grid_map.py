@@ -7,90 +7,103 @@ class GridMap:
     def __init__(self, width: int, height: int, risk_zones_count: int = 5, obstacle_density: float = 0.15) -> None:
         self.width = width
         self.height = height
+
+        # 1. TŁO: Zaczynamy od CZYSTEGO BIAŁEGO (0.0 - bezpieczna ulica/powietrze)
         self.grid = np.zeros((width, height), dtype=np.float64)
 
-        self._generate_obstacles(obstacle_density)
-        self._generate_risk_zones(risk_zones_count)
+        # 2. BUDYNKI: Stawiamy kamienice
+        self._generate_urban_layout(obstacle_density)
 
-    def _generate_obstacles(self, density: float) -> None:
-        """Generuje czarne prostokąty (budynki)."""
+    def _generate_urban_layout(self, density: float) -> None:
+        """
+        Generuje miasto poprzez stawianie budynków na pustym terenie.
+        Gwarantuje przejezdność (ulice) i tworzy 'aurę' ryzyka (chodniki).
+        """
         total_pixels = self.width * self.height
-        target_obstacle_pixels = int(total_pixels * density)
-        current_obstacle_pixels = 0
+        target_pixels = int(total_pixels * density)
+        current_pixels = 0
         attempts = 0
 
-        while current_obstacle_pixels < target_obstacle_pixels and attempts < 5000:
-            w = random.randint(5, 20)
-            h = random.randint(5, 20)
-            x = random.randint(0, self.width - w)
-            y = random.randint(0, self.height - h)
+        # Lista budynków do późniejszego wygenerowania chodników
+        buildings = []
 
-            self.grid[x:x + w, y:y + h] = 1.0
-            current_obstacle_pixels = np.count_nonzero(self.grid == 1.0)
+        # --- ETAP 1: STAWIANIE KAMIENIC ---
+        while current_pixels < target_pixels and attempts < 20000:
             attempts += 1
 
-    def _generate_risk_zones(self, count: int) -> None:
-        """
-        Generuje strefy ryzyka w kształcie prostokątów (chodniki, ulice).
-        Ryzyko jest największe w środku prostokąta i zanika ku krawędziom.
-        """
-        # Zwiększamy liczbę stref, bo chodniki są węższe niż wielkie koła
-        effective_count = count * 2
+            # Losujemy wymiary kamienicy (nieregularne kształty)
+            w = random.randint(8, 25)
+            h = random.randint(8, 25)
+            x = random.randint(1, self.width - w - 1)
+            y = random.randint(1, self.height - h - 1)
 
-        for _ in range(effective_count):
-            # Losujemy wymiary - chcemy więcej podłużnych kształtów (chodniki)
-            if random.random() > 0.3:
-                # Długi i wąski (chodnik)
-                if random.random() > 0.5:  # Poziomy
-                    w = random.randint(20, 60)
-                    h = random.randint(3, 8)
-                else:  # Pionowy
-                    w = random.randint(3, 8)
-                    h = random.randint(20, 60)
-            else:
-                # Kwadratowy (plac, rynek)
-                w = random.randint(10, 25)
-                h = random.randint(10, 25)
+            # STREFA OCHRONNA DLA STARTU I METY
+            # Nie stawiamy budynku blisko (5,5) ani (95,95)
+            # Dystans Euklidesowy do startu i mety
+            dist_start = np.sqrt((x - 5) ** 2 + (y - 5) ** 2)
+            dist_goal = np.sqrt((x - 95) ** 2 + (y - 95) ** 2)
 
-            # Pozycja środka
-            cx = random.randint(0, self.width)
-            cy = random.randint(0, self.height)
+            if dist_start < 15 or dist_goal < 15:
+                continue
 
-            intensity = random.uniform(0.5, 0.95)  # Max ryzyko w centrum (np. 0.95)
+            # Sprawdzamy, czy nie nachodzi za bardzo na inne budynki (żeby zachować ulice)
+            # Wycinek mapy gdzie chcemy postawić budynek
+            region = self.grid[x:x + w, y:y + h]
+            if np.any(region == 1.0):
+                # Jeśli już tu coś stoi, to z dużą szansą odpuszczamy (zachowanie odstępów/ulic)
+                # Ale czasem pozwalamy na 'przyklejenie' się (pierzeja ulicy)
+                if random.random() > 0.3:
+                    continue
 
-            # Obliczanie gradientu prostokątnego
-            y_indices, x_indices = np.ogrid[:self.width, :self.height]
+            # Stawiamy budynek (ŚCIANA = 1.0)
+            self.grid[x:x + w, y:y + h] = 1.0
+            buildings.append((x, y, w, h))
 
-            # Odległość znormalizowana od środka (0 w środku, 1 na krawędzi prostokąta)
-            # Używamy abs() aby zrobić gradient liniowy
-            # dx = odległość x od środka / połowa szerokości
-            dx = np.abs(x_indices - cx) / (w / 2)
-            dy = np.abs(y_indices - cy) / (h / 2)
+            # Aktualizacja licznika (zgrubna)
+            current_pixels += w * h
 
-            # Bierzemy maximum z dx i dy - to tworzy kształt prostokąta (metryka Czebyszewa)
-            dist_normalized = np.maximum(dx, dy)
+        # --- ETAP 2: GENEROWANIE CHODNIKÓW I RYZYKA (GRADIENT) ---
+        # Iterujemy, żeby rozmyć granice budynków.
+        # To stworzy czerwoną aurę wokół czarnych prostokątów.
 
-            # Maska: bierzemy tylko to co jest wewnątrz prostokąta (dist <= 1.0)
-            mask = dist_normalized <= 1.0
+        risk_layer = np.zeros_like(self.grid)
 
-            # Formuła ryzyka: Im dalej od środka, tym mniejsze
-            # risk = intensity * (1 - dist)
-            risk_values = intensity * (1.0 - dist_normalized[mask])
+        # Promień oddziaływania ryzyka (szerokość chodnika/strefy zrzutu)
+        # Im większy, tym szersze czerwone pole.
+        spread_radius = 6
 
-            # Nakładanie na mapę
-            current_values = self.grid[mask]
+        # Używamy distance_transform (lub symulacji) dla wydajności
+        # Tutaj ręczna symulacja propagacji ryzyka:
 
-            # Ważne: Bierzemy MAX, żeby chodniki się łączyły, a nie nadpisywały
-            new_values = np.maximum(current_values, risk_values)
+        # Kopiujemy same ściany
+        walls = (self.grid == 1.0).astype(float)
 
-            # Nie przekraczamy 0.99 (bo 1.0 to ściana)
-            new_values = np.minimum(new_values, 0.99)
+        # Algorytm 'rozlewania' ryzyka
+        from scipy.ndimage import distance_transform_edt
 
-            # Jeśli w tym miejscu jest już ściana (1.0), zostawiamy ścianę
-            is_wall = self.grid[mask] == 1.0
-            final_values = np.where(is_wall, 1.0, new_values)
+        # Obliczamy odległość każdego piksela od najbliższej ściany
+        # distance_transform_edt liczy dystans do ZERA, więc odwracamy logikę (ściany to 0 w obliczeniach)
+        inverted_grid = 1.0 - walls
+        dist_matrix = distance_transform_edt(inverted_grid)
 
-            self.grid[mask] = final_values
+        # Tworzymy gradient
+        # Ryzyko = 1.0 przy ścianie, maleje do 0.0 w odległości 'spread_radius'
+        # Formuła: exp(-dist) daje ładny, miękki spadek
+        risk_gradient = np.exp(-dist_matrix / 3.0)
+
+        # Normalizacja i przycięcie
+        # Chcemy, żeby tuż przy ścianie było np. 0.9, a 5 kratek dalej 0.1
+        risk_gradient = np.clip(risk_gradient, 0.0, 0.99)
+
+        # Tam gdzie dystans jest duży (środek ulicy), zerujemy ryzyko do idealnej bieli
+        risk_gradient[dist_matrix > spread_radius] = 0.0
+
+        # --- ETAP 3: ŁĄCZENIE ---
+        # Nakładamy gradient na mapę
+        self.grid = np.maximum(self.grid, risk_gradient)
+
+        # Przywracamy ściany jako idealne 1.0 (bo gradient mógł je lekko zmienić)
+        self.grid[walls == 1.0] = 1.0
 
     def get_cost(self, x: int, y: int) -> float:
         if 0 <= x < self.width and 0 <= y < self.height:
