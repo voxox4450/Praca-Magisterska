@@ -87,7 +87,6 @@ def plot_simulation(
                   f"Długość: {stats['length']:.2f} m | Ryzyko: {stats['risk']:.2f} | Czas: {stats['time']:.4f} s")
     ax.set_title(title_text, fontsize=14, pad=15)
 
-    print(f"Otwieranie okna: {algo_name}")
     plt.show(block=block)
 
 
