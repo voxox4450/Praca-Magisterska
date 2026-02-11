@@ -3,7 +3,7 @@ import time
 import math
 from typing import List, Tuple, Dict, Any
 from environment.grid_map import GridMap
-from algorithms.common import Node, reconstruct_path, calculate_dynamic_penalty
+from algorithms.common import Node, reconstruct_path
 
 
 def run_risk_astar(
@@ -11,7 +11,7 @@ def run_risk_astar(
         start: Tuple[int, int],
         goal: Tuple[int, int],
         risk_weight: float = 20.0,
-        turn_penalty: float = 2.0
+        turn_penalty: float = 2.0  # Kara za skręt (dla płynności)
 ) -> Tuple[List[Tuple[int, int]], Dict[str, Any]]:
     t0 = time.time()
 
@@ -22,6 +22,9 @@ def run_risk_astar(
     g_score = {(start[0], start[1]): 0.0}
     visited = set()
     nodes_expanded = 0
+
+    # Promień drona
+    DRONE_RADIUS = 2.0
 
     while open_list:
         current = heapq.heappop(open_list)
@@ -39,45 +42,35 @@ def run_risk_astar(
             continue
         visited.add((current.x, current.y))
 
-        neighbors = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]
-
-        for dx, dy in neighbors:
+        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]:
             nx, ny = current.x + dx, current.y + dy
 
-            if not (0 <= nx < grid_map.width and 0 <= ny < grid_map.height):
+            # 1. Sprawdzenie kolizji fizycznej (wymiary drona)
+            if grid_map.is_collision(nx, ny, drone_radius=DRONE_RADIUS):
                 continue
 
+            # 2. Pobranie wartości ryzyka (gradientu)
             cell_risk = grid_map.get_cost(nx, ny)
-            if cell_risk >= 1.0:  # Ściana
-                continue
 
+            # Koszt odległości
             dist_cost = math.sqrt(dx ** 2 + dy ** 2)
 
-            # 1. Obliczamy karę za pęd (wspólną funkcją)
-            # Uwaga: Dla algorytmu Risk-Aware mnożymy karę pędu przez risk_weight,
-            # żeby suwak miał wpływ na to, jak bardzo boimy się zderzenia.
-            base_momentum_penalty = calculate_dynamic_penalty(
-                grid_map, current.direction, (dx, dy), (nx, ny), braking_distance=4
-            )
-
-            # W tym algorytmie kara za pęd jest skalowana przez wagę ryzyka (jeśli użytkownik ustawił dużą)
-            # lub brana surowa (żeby chociaż omijał ściany)
-            momentum_cost = base_momentum_penalty * (1.0 + risk_weight / 10.0)
-
-            # 2. Koszt statyczny ryzyka (tego pola)
+            # Koszt Ryzyka (Statyczny)
             static_risk_cost = cell_risk * risk_weight
 
-            # 3. Koszt skrętu
+            # Koszt Skrętu (Dla estetyki/płynności - unikanie zygzaków)
             turn_cost = 0.0
             if current.parent is not None and current.direction != (dx, dy):
                 turn_cost = turn_penalty
 
-            new_g = current.cost + dist_cost + static_risk_cost + momentum_cost + turn_cost
+            # Suma kosztów (bez Momentum)
+            new_g = current.cost + dist_cost + static_risk_cost + turn_cost
 
             if (nx, ny) not in g_score or new_g < g_score[(nx, ny)]:
                 g_score[(nx, ny)] = new_g
                 h = math.sqrt((nx - goal[0]) ** 2 + (ny - goal[1]) ** 2)
 
+                # Zapisujemy direction, aby w następnym kroku wiedzieć czy skręcamy
                 neighbor = Node(nx, ny, new_g, current, direction=(dx, dy), heuristic=h)
                 heapq.heappush(open_list, neighbor)
 

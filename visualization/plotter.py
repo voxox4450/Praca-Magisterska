@@ -3,6 +3,7 @@ import matplotlib.patheffects as pe
 from matplotlib.widgets import Slider
 from matplotlib.colors import LinearSegmentedColormap
 import numpy as np
+import scipy.interpolate as interp
 from typing import List, Tuple, Callable, Any, Dict
 from environment.grid_map import GridMap
 
@@ -33,29 +34,44 @@ def setup_dark_theme(fig, ax):
         spine.set_edgecolor('white')
 
 
+def smooth_path_bspline(path: List[Tuple[int, int]]) -> Tuple[np.ndarray, np.ndarray]:
+    """Wygładzanie trasy B-Spline."""
+    if len(path) < 3:
+        px = [p[0] for p in path]
+        py = [p[1] for p in path]
+        return np.array(px), np.array(py)
+
+    x = [p[0] for p in path]
+    y = [p[1] for p in path]
+
+    try:
+        tck, u = interp.splprep([x, y], s=3.0, k=3)
+        u_new = np.linspace(0, 1, num=len(path) * 10)
+        x_smooth, y_smooth = interp.splev(u_new, tck)
+        return x_smooth, y_smooth
+    except Exception:
+        return np.array(x), np.array(y)
+
+
 def plot_simulation(
         grid_map: GridMap,
         path: List[Tuple[int, int]],
         stats: Dict[str, Any],
         algo_name: str,
-        block: bool = True
+        block: bool = True,
+        use_smoothing: bool = False
 ) -> None:
     fig, ax = plt.subplots(figsize=(12, 9))
-    # Marginesy: right=0.75 zostawia 25% miejsca z prawej strony
     plt.subplots_adjust(right=0.75, left=0.05, bottom=0.1, top=0.9)
     setup_dark_theme(fig, ax)
 
     # Mapa
     img = ax.imshow(grid_map.grid.T, origin='lower', cmap=get_city_cmap(), vmin=0, vmax=1)
 
-    # === 1. LEGENDA RYZYKA (COLORBAR) ===
-    # shrink=0.8 -> Pasek zajmuje 80% (4/5) dostępnej wysokości
-    # anchor=(0.0, 1.0) -> Pasek jest "przyklejony" do górnej krawędzi wykresu
-    cbar = fig.colorbar(img, ax=ax, location='right', pad=0.05, shrink=0.8, anchor=(0.0, 1.0))
+    # === 1. LEGENDA RYZYKA (PRZYWRÓCONA) ===
+    cbar = fig.colorbar(img, ax=ax, location='right', pad=0.05, shrink=0.80, anchor=(0.0, 1.0))
     cbar.set_ticks([0, 0.5, 1])
     cbar.set_ticklabels(['Bezpiecznie', 'Ryzyko', 'BUDYNEK'])
-
-    # Stylizacja colorbara
     cbar.ax.yaxis.set_tick_params(color='white', labelcolor='white')
     cbar.set_label('Poziom Ryzyka', color='white', labelpad=10)
 
@@ -63,15 +79,24 @@ def plot_simulation(
     if path:
         path_x = [p[0] for p in path]
         path_y = [p[1] for p in path]
-        ax.plot(path_x, path_y, color='cyan', linewidth=3, label='Trasa',
-                path_effects=[pe.withStroke(linewidth=5, foreground="blue")])
-        ax.scatter([path_x[0]], [path_y[0]], color='lime', marker='o', s=150, label='Start', edgecolors='black',
-                   zorder=5)
+
+        if use_smoothing:
+            # DLA RISK A*: Dwie linie (szary plan + cyjanowa trajektoria)
+            ax.plot(path_x, path_y, color='gray', linestyle='--', linewidth=1, alpha=0.6)
+            smooth_x, smooth_y = smooth_path_bspline(path)
+            ax.plot(smooth_x, smooth_y, color='cyan', linewidth=3, label='Trajektoria (Smooth)',
+                    path_effects=[pe.withStroke(linewidth=5, foreground="blue")])
+        else:
+            # DLA DIJKSTRA / STANDARD A*: Tylko jedna, kanciasta linia (Bezpieczna)
+            ax.plot(path_x, path_y, color='cyan', linewidth=3, label='Trasa',
+                    path_effects=[pe.withStroke(linewidth=5, foreground="blue")])
+
+        # Start i Meta
+        ax.scatter([path_x[0]], [path_y[0]], color='lime', s=150, label='Start', edgecolors='black', zorder=5)
         ax.scatter([path_x[-1]], [path_y[-1]], color='magenta', marker='X', s=150, label='Cel', edgecolors='black',
                    zorder=5)
 
-    # === 2. LEGENDA ELEMENTÓW (Dół-Prawo) ===
-    # bbox_to_anchor=(1.04, 0.0) -> Ustawia legendę pod spodem, na równi z dolną osią wykresu
+    # === 2. LEGENDA ELEMENTÓW (PRZYWRÓCONA NA DOLE) ===
     legend = ax.legend(
         loc='lower left',
         bbox_to_anchor=(1.04, 0.0),
@@ -84,7 +109,7 @@ def plot_simulation(
 
     # Tytuł
     title_text = (f"{algo_name}\n"
-                  f"Długość: {stats['length']:.2f} m | Ryzyko: {stats['risk']:.2f} | Czas: {stats['time']:.4f} s")
+                  f"Dystans: {stats['length']:.1f} m | Ryzyko: {stats['risk']:.1f}")
     ax.set_title(title_text, fontsize=14, pad=15)
 
     plt.show(block=block)
@@ -102,19 +127,21 @@ def plot_interactive_risk(
 
     img = ax.imshow(grid_map.grid.T, origin='lower', cmap=get_city_cmap(), vmin=0, vmax=1)
 
-    # === 1. COLORBAR (4/5 wysokości) ===
-    cbar = fig.colorbar(img, ax=ax, location='right', pad=0.05, shrink=0.8, anchor=(0.0, 1.0))
+    # === 1. COLORBAR (PRZYWRÓCONY) ===
+    cbar = fig.colorbar(img, ax=ax, location='right', pad=0.05, shrink=0.80, anchor=(0.0, 1.0))
     cbar.set_ticks([0, 0.5, 1])
     cbar.set_ticklabels(['Bezpiecznie', 'Ryzyko', 'BUDYNEK'])
     cbar.ax.yaxis.set_tick_params(color='white', labelcolor='white')
 
     # Trasa
-    line, = ax.plot([], [], color='cyan', linewidth=3, label='Trasa',
-                    path_effects=[pe.withStroke(linewidth=5, foreground="blue")])
+    line_raw, = ax.plot([], [], color='gray', linestyle='--', linewidth=1, alpha=0.5)
+    line_smooth, = ax.plot([], [], color='cyan', linewidth=3, label='Trasa',
+                           path_effects=[pe.withStroke(linewidth=4, foreground="blue")])
+
     ax.scatter([start[0]], [start[1]], color='lime', s=150, label='Start', edgecolors='black', zorder=5)
     ax.scatter([goal[0]], [goal[1]], color='magenta', marker='X', s=150, label='Cel', edgecolors='black', zorder=5)
 
-    # === 2. LEGENDA ELEMENTÓW ===
+    # === 2. LEGENDA ELEMENTÓW (PRZYWRÓCONA) ===
     legend = ax.legend(
         loc='lower left',
         bbox_to_anchor=(1.04, 0.0),
@@ -141,24 +168,189 @@ def plot_interactive_risk(
 
     def update(val):
         w = risk_slider.val
-        path, stats = search_func(grid_map, start, goal, risk_weight=w, turn_penalty=2.0)
+        # Tutaj wywołujemy algorytm
+        path, stats = search_func(grid_map, start, goal, risk_weight=w, turn_penalty=20.0)
 
         if path:
+            # Plan surowy
             px = [p[0] for p in path]
             py = [p[1] for p in path]
-            line.set_data(px, py)
+            line_raw.set_data(px, py)
+
+            # Wygładzanie
+            sx, sy = smooth_path_bspline(path)
+            line_smooth.set_data(sx, sy)
 
             title_text = (f"A* Risk-Aware (Interaktywny)\n"
-                          f"Waga: {w:.0f} | Długość: {stats['length']:.1f} | Ryzyko: {stats['risk']:.1f} | Czas: {stats['time']:.4f} s")
+                          f"Waga: {w:.0f} | Długość: {stats['length']:.1f} | Ryzyko: {stats['risk']:.1f}")
             ax.set_title(title_text, fontsize=14)
         else:
-            line.set_data([], [])
+            line_raw.set_data([], [])
+            line_smooth.set_data([], [])
             ax.set_title("Brak trasy!", color='red')
         fig.canvas.draw_idle()
 
     risk_slider.on_changed(update)
     update(20.0)
 
-    print("Otwieranie okna interaktywnego")
     plt.show(block=True)
     return risk_slider
+
+
+def run_online_simulation(
+        env: GridMap,
+        start: Tuple[int, int],
+        goal: Tuple[int, int],
+        search_func: Callable
+) -> None:
+    """
+    H3: Symulacja Online (Poprawiony Layout).
+    """
+    fig, ax = plt.subplots(figsize=(12, 9))
+
+    # --- UKŁAD OKNA ---
+    # right=0.60 -> Zostawiamy 40% szerokości okna na legendę i pasek z prawej strony
+    plt.subplots_adjust(right=0.60, left=0.05, bottom=0.1, top=0.9)
+    setup_dark_theme(fig, ax)
+
+    ax.set_title("TRYB ONLINE (H3): Kliknij na trasie, aby dodać przeszkodę!", color='yellow', fontsize=14)
+
+    # 1. Mapa
+    img = ax.imshow(env.grid.T, origin='lower', cmap=get_city_cmap(), vmin=0, vmax=1)
+
+    # 2. Colorbar (Pełna wysokość)
+    # shrink=1.0 sprawia, że pasek jest tak wysoki jak oś Y wykresu
+    cbar = fig.colorbar(img, ax=ax, location='right', pad=0.05, shrink=0.50, anchor=(0.35, 0.75))
+    cbar.set_ticks([0, 0.5, 1])
+    cbar.set_ticklabels(['Bezpiecznie', 'Ryzyko', 'BUDYNEK'])
+    cbar.ax.yaxis.set_tick_params(color='white', labelcolor='white')
+    # Label paska
+    cbar.set_label('Poziom Ryzyka', color='white', labelpad=15)
+
+    # 3. Trasa Startowa (W=20)
+    path_global, _ = search_func(env, start, goal, risk_weight=20.0)
+
+    if not path_global:
+        print("Błąd: Nie znaleziono trasy startowej.")
+        return
+
+    # Wygładzamy od razu
+    gx_smooth, gy_smooth = smooth_path_bspline(path_global)
+
+    # --- ELEMENTY WYKRESU ---
+
+    # A. Pierwotny Plan - CZARNY, GRUBY, WYRAŹNY
+    line_global, = ax.plot(gx_smooth, gy_smooth,
+                           color='black', linestyle='--', linewidth=2.5, alpha=0.8,
+                           label='Pierwotny Plan')
+
+    # B. Droga Przebyta
+    line_flown, = ax.plot([], [], color='lime', linewidth=3, label='Droga Przebyta', zorder=3)
+
+    # C. Replanowana
+    line_new, = ax.plot([], [], color='cyan', linewidth=3, label='Replanowana Trasa',
+                        path_effects=[pe.withStroke(linewidth=5, foreground="blue")], zorder=4)
+
+    # Markery
+    ax.scatter([start[0]], [start[1]], color='lime', s=150, label='Start', edgecolors='black', zorder=5)
+    ax.scatter([goal[0]], [goal[1]], color='magenta', marker='X', s=150, label='Cel', edgecolors='black', zorder=5)
+
+    drone_marker, = ax.plot([], [], 'o', color='yellow', markersize=12, label='Wykrycie (5m przed)',
+                            markeredgecolor='black', zorder=6)
+
+    # --- LEGENDA H3 ---
+    # bbox_to_anchor=(1.35, 1.0) -> Przesunięta mocno w prawo, poza colorbar
+    legend = ax.legend(
+        loc='upper left',
+        bbox_to_anchor=(1.04, 0.3),
+        facecolor='#333333', edgecolor='white', title="Legenda"
+    )
+    plt.setp(legend.get_texts(), color='white')
+    plt.setp(legend.get_title(), color='white')
+
+    state = {"clicked": False}
+
+    def onclick(event):
+        if state["clicked"] or event.xdata is None or event.ydata is None:
+            return
+
+        click_x, click_y = int(event.xdata), int(event.ydata)
+        print(f"\n[ONLINE] Wykryto kliknięcie w: ({click_x}, {click_y})")
+
+        # Dodajemy przeszkodę
+        OBSTACLE_RADIUS = 8
+        env.add_dynamic_risk_zone(click_x, click_y, radius=OBSTACLE_RADIUS)
+        img.set_data(env.grid.T)
+
+        # Logika 5m
+        SENSOR_RANGE = 5
+        LIMIT_DIST = OBSTACLE_RADIUS + SENSOR_RANGE
+
+        collision_idx = -1
+        for i, (px, py) in enumerate(path_global):
+            dist_to_center = np.sqrt((px - click_x) ** 2 + (py - click_y) ** 2)
+            if dist_to_center <= LIMIT_DIST:
+                collision_idx = i
+                break
+
+        if collision_idx == -1:
+            print("[ONLINE] Brak kolizji na trasie. Zagrożenie jest za daleko (>5m).")
+            print("[ONLINE] Kontynuuję lot wg pierwotnego planu.")
+
+            ax.set_title("Zagrożenie poza zasięgiem (>5m).\nKontynuuję pierwotną trasę.", color='lime', fontsize=14)
+            # Opcjonalnie: Możemy narysować, że cała trasa została przebyta (zamienić czarną na zieloną)
+            line_flown.set_data(gx_smooth, gy_smooth)
+
+            state["clicked"] = True
+            fig.canvas.draw()
+            return  # KONIEC - nie replanujemy!
+
+        # if collision_idx == -1:
+        #     closest_dist = float('inf')
+        #     for i, (px, py) in enumerate(path_global):
+        #         d = np.sqrt((px - click_x) ** 2 + (py - click_y) ** 2)
+        #         if d < closest_dist:
+        #             closest_dist = d
+        #             collision_idx = i
+        #     drone_idx = max(0, collision_idx - SENSOR_RANGE)
+        # else:
+        #     drone_idx = max(0, collision_idx)
+
+        # --- JEŚLI JEST KOLIZJA (Poniżej wykonuje się tylko gdy zagrożenie jest blisko) ---
+
+        # Cofamy się o 5m od momentu wejścia w strefę (symulacja czasu reakcji)
+        drone_idx = max(0, collision_idx - SENSOR_RANGE)
+        current_drone_pos = path_global[drone_idx]
+
+        print(f"[ONLINE] Wykryto zagrożenie! Replanowanie od: {current_drone_pos}")
+
+        # Replanowanie (W=50)
+        path_local, _ = search_func(env, current_drone_pos, goal, risk_weight=50.0)
+        current_drone_pos = path_global[drone_idx]
+        print(f"[ONLINE] Replanowanie od: {current_drone_pos}")
+
+        path_local, _ = search_func(env, current_drone_pos, goal, risk_weight=50.0)
+
+        if path_local:
+            # Rysowanie
+            flown_raw = path_global[:drone_idx + 1]
+            if len(flown_raw) > 2:
+                fx, fy = smooth_path_bspline(flown_raw)
+            else:
+                fx = [p[0] for p in flown_raw]
+                fy = [p[1] for p in flown_raw]
+            line_flown.set_data(fx, fy)
+
+            nx, ny = smooth_path_bspline(path_local)
+            line_new.set_data(nx, ny)
+
+            drone_marker.set_data([current_drone_pos[0]], [current_drone_pos[1]])
+            ax.set_title(f"ZAGROŻENIE OMINIĘTE!\nReakcja 5m przed strefą.", color='lime', fontsize=14)
+        else:
+            ax.set_title("BŁĄD KRYTYCZNY: Brak drogi!", color='red', fontsize=14)
+
+        state["clicked"] = True
+        fig.canvas.draw()
+
+    cid = fig.canvas.mpl_connect('button_press_event', onclick)
+    plt.show(block=True)

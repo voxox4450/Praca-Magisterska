@@ -21,6 +21,9 @@ def run_astar(
     visited = set()
     nodes_expanded = 0
 
+    # Promień drona
+    DRONE_RADIUS = 2.0
+
     while open_list:
         current = heapq.heappop(open_list)
         nodes_expanded += 1
@@ -37,14 +40,11 @@ def run_astar(
             continue
         visited.add((current.x, current.y))
 
-        neighbors = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]
-
-        for dx, dy in neighbors:
+        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]:
             nx, ny = current.x + dx, current.y + dy
 
-            if not (0 <= nx < grid_map.width and 0 <= ny < grid_map.height):
-                continue
-            if grid_map.get_cost(nx, ny) >= 1.0:
+            # ZMIANA: Kolizja z uwzględnieniem wymiarów
+            if grid_map.is_collision(nx, ny, drone_radius=DRONE_RADIUS):
                 continue
 
             dist_cost = math.sqrt(dx ** 2 + dy ** 2)
@@ -52,7 +52,6 @@ def run_astar(
 
             if (nx, ny) not in g_score or new_g < g_score[(nx, ny)]:
                 g_score[(nx, ny)] = new_g
-                # A*: Heurystyka Euklidesowa
                 h = math.sqrt((nx - goal[0]) ** 2 + (ny - goal[1]) ** 2)
                 neighbor = Node(nx, ny, new_g, current, heuristic=h)
                 heapq.heappush(open_list, neighbor)
