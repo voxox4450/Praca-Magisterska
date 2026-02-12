@@ -22,25 +22,49 @@ def main() -> None:
     print("2. Wersja ONLINE (Hipoteza H3 - Dynamiczna Reakcja)")
     print("   - Symulacja lotu")
     print("   - Dodawanie zagrożeń kliknięciem")
+    print("   - Tabela generowana dynamicznie po wykryciu przeszkody")
 
     mode = input("\nTwój wybór (1 lub 2): ").strip()
 
     # Rozmiar mapy
     SIZE: int = 100
+    DRONE_RADIUS: float = 1.0  # Promień drona w metrach
+    SAFE_MARGIN: float = 2.0  # Dodatkowy margines od budynków
+
+    COLLISION_RADIUS = DRONE_RADIUS + SAFE_MARGIN
 
     if mode == '1':
-        run_offline_mode(SIZE)
+        run_offline_mode(SIZE, COLLISION_RADIUS)
     elif mode == '2':
-        run_online_mode(SIZE)
+        run_online_mode(SIZE, COLLISION_RADIUS)
     else:
         print("Nieprawidłowy wybór. Uruchom ponownie.")
 
 
-def run_offline_mode(size: int):
-    """Tryb H1: Analiza wpływu wagi ryzyka na trasę"""
+def get_user_difficulty() -> float:
+    """Wspólna funkcja wyboru trudności dla obu trybów."""
+    print("\nWYBIERZ POZIOM TRUDNOŚCI OTOCZENIA:")
+    print("1. Mało przeszkód (5%)  - Teren otwarty")
+    print("2. Średnio (15%)        - Teren zurbanizowany (Zalecane)")
+    print("3. Dużo przeszkód (30%) - Gęsta zabudowa")
+
+    while True:
+        choice = input("Wybór (1-3): ").strip()
+        if choice == '1':
+            return 0.05
+        elif choice == '2':
+            return 0.15
+        elif choice == '3':
+            return 0.30
+
+
+def run_offline_mode(size: int, collision_radius: float) -> None:
+    """Tryb H1: Analiza statyczna (Tabela na start)"""
     print(f"\n=== URUCHAMIANIE TRYBU OFFLINE (H1) ===")
 
+    # Wybór trudności
     density = get_user_difficulty()
+
     env = GridMap(width=size, height=size, risk_zones_count=8, obstacle_density=density)
     start_pos = (5, 5)
     goal_pos = (95, 95)
@@ -56,7 +80,6 @@ def run_offline_mode(size: int):
     path_a, stats_a = run_astar(env, start_pos, goal_pos)
 
     # 3. Risk A* (Seria pomiarowa 0 - 100)
-    # POPRAWKA: Zakres od 0 do 100 co 5
     risk_weights = [float(x) for x in range(0, 101, 5)]
 
     print("-" * 80)
@@ -95,35 +118,27 @@ def run_offline_mode(size: int):
     plot_interactive_risk(env, start_pos, goal_pos, run_risk_astar)
 
 
-def run_online_mode(size: int):
-    """Tryb H3: Symulacja dynamiczna z klikaniem"""
+def run_online_mode(size: int, collision_radius: float) -> None:
+    """Tryb H3: Symulacja dynamiczna"""
     print(f"\n=== URUCHAMIANIE TRYBU ONLINE (H3) ===")
-    print("Instrukcja:")
-    print("1. Pojawi się okno z planowaną trasą.")
-    print("2. KLIKNIJ na trasie (przed dronem), aby wywołać zagrożenie.")
-    print("3. Obserwuj reakcję (replanowanie).")
 
-    # Stała gęstość dla łatwiejszych testów online
-    env = GridMap(width=size, height=size, risk_zones_count=8, obstacle_density=0.45)
+    # Wybór trudności
+    density = get_user_difficulty()
+
+    print("\n[INFO] URUCHAMIANIE WIZUALIZACJI INTERAKTYWNEJ...")
+    print("Instrukcja:")
+    print("1. Zobaczysz zaplanowaną trasę (Biała/Czarna linia).")
+    print("2. KLIKNIJ na trasie (przed dronem), aby wywołać zagrożenie.")
+    print("3. W konsoli pojawi się tabela analizy dla tego konkretnego zdarzenia.")
+    print("4. Na mapie zobaczysz nową trasę (Cyjanową) lub powrót do bazy (Pomarańczową).")
+
+    # Tworzymy mapę z wybraną gęstością
+    env = GridMap(width=size, height=size, risk_zones_count=8, obstacle_density=density)
     start_pos = (5, 5)
     goal_pos = (95, 95)
 
-    run_online_simulation(env, start_pos, goal_pos, search_func=run_risk_astar)
-
-
-def get_user_difficulty() -> float:
-    print("\nWYBIERZ POZIOM TRUDNOŚCI (Dla Offline):")
-    print("1. Mało przeszkód (5%)")
-    print("2. Średnio (15%)")
-    print("3. Dużo przeszkód (30%)")
-    while True:
-        c = input("Wybór: ").strip()
-        if c == '1':
-            return 0.05
-        elif c == '2':
-            return 0.15
-        elif c == '3':
-            return 0.30
+    # Uruchamiamy symulację (Tabela wygeneruje się wewnątrz tej funkcji po kliknięciu)
+    run_online_simulation(env, start_pos, goal_pos, search_func=run_risk_astar, collision_radius = collision_radius)
 
 
 if __name__ == "__main__":

@@ -8,7 +8,8 @@ from algorithms.common import Node, reconstruct_path
 def run_dijkstra(
         grid_map: GridMap,
         start: Tuple[int, int],
-        goal: Tuple[int, int]
+        goal: Tuple[int, int],
+        collision_radius: float = 3.0
 ) -> Tuple[List[Tuple[int, int]], Dict[str, Any]]:
     t0 = time.time()
     start_node = Node(start[0], start[1], 0.0)
@@ -19,7 +20,7 @@ def run_dijkstra(
     nodes_expanded = 0
 
     # Promień drona (margines bezpieczeństwa)
-    DRONE_RADIUS = 2.0
+    DRONE_RADIUS = 1.0
 
     while open_list:
         current = heapq.heappop(open_list)
@@ -41,7 +42,7 @@ def run_dijkstra(
             nx, ny = current.x + dx, current.y + dy
 
             # ZMIANA: Sprawdzamy czy dron się zmieści fizycznie
-            if grid_map.is_collision(nx, ny, drone_radius=DRONE_RADIUS):
+            if grid_map.is_collision(nx, ny, drone_radius=collision_radius):
                 continue
 
             dist_cost = math.sqrt(dx ** 2 + dy ** 2)

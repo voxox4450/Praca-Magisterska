@@ -9,7 +9,8 @@ from algorithms.common import Node, reconstruct_path
 def run_astar(
         grid_map: GridMap,
         start: Tuple[int, int],
-        goal: Tuple[int, int]
+        goal: Tuple[int, int],
+        collision_radius: float = 3.0
 ) -> Tuple[List[Tuple[int, int]], Dict[str, Any]]:
     t0 = time.time()
 
@@ -22,7 +23,7 @@ def run_astar(
     nodes_expanded = 0
 
     # Promień drona
-    DRONE_RADIUS = 2.0
+    #DRONE_RADIUS = 1.0
 
     while open_list:
         current = heapq.heappop(open_list)
@@ -44,7 +45,7 @@ def run_astar(
             nx, ny = current.x + dx, current.y + dy
 
             # ZMIANA: Kolizja z uwzględnieniem wymiarów
-            if grid_map.is_collision(nx, ny, drone_radius=DRONE_RADIUS):
+            if grid_map.is_collision(nx, ny, drone_radius=collision_radius):
                 continue
 
             dist_cost = math.sqrt(dx ** 2 + dy ** 2)
