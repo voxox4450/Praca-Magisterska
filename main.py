@@ -104,7 +104,7 @@ def run_online_mode(size: int):
     print("3. Obserwuj reakcję (replanowanie).")
 
     # Stała gęstość dla łatwiejszych testów online
-    env = GridMap(width=size, height=size, risk_zones_count=8, obstacle_density=0.15)
+    env = GridMap(width=size, height=size, risk_zones_count=8, obstacle_density=0.45)
     start_pos = (5, 5)
     goal_pos = (95, 95)
 

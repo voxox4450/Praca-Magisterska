@@ -65,14 +65,22 @@ class GridMap:
 
     def is_collision(self, x: int, y: int, drone_radius: float = 2.0) -> bool:
         """
-        Sprawdza czy dron o zadanym promieniu zmieści się w punkcie (x,y).
-        Zwraca True = KOLIZJA.
+        Sprawdza czy dron może wlecieć w dany punkt.
+        Zwraca True (KOLIZJA) jeśli:
+        1. Jest za blisko ściany budynku.
+        2. Znajduje się wewnątrz strefy wysokiego ryzyka (czerwona plama).
         """
         if not (0 <= x < self.width and 0 <= y < self.height):
             return True
 
-        # Jeśli jesteśmy bliżej ściany niż wynosi promień drona -> KOLIZJA
+        # 1. Kolizja geometryczna (ściany statyczne)
         if self.dist_matrix[x, y] <= drone_radius:
+            return True
+
+        # 2. Kolizja logiczna (NOWOŚĆ - naprawia przelatywanie przez strefę)
+        # Jeśli pole jest "bardzo czerwone" (ryzyko >= 0.9), traktujemy je jak ścianę.
+        # W metodzie add_dynamic_risk_zone ustawiamy wartość na 0.95, więc to zadziała.
+        if self.grid[x, y] >= 0.90:
             return True
 
         return False

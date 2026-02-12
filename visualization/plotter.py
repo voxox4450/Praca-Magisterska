@@ -122,7 +122,7 @@ def plot_interactive_risk(
         search_func: Callable
 ) -> Slider:
     fig, ax = plt.subplots(figsize=(12, 9))
-    plt.subplots_adjust(bottom=0.20, right=0.75, left=0.05, top=0.9)
+    plt.subplots_adjust(bottom=0.20, right=0.65, left=0.05, top=0.9)
     setup_dark_theme(fig, ax)
 
     img = ax.imshow(grid_map.grid.T, origin='lower', cmap=get_city_cmap(), vmin=0, vmax=1)
@@ -204,67 +204,54 @@ def run_online_simulation(
         search_func: Callable
 ) -> None:
     """
-    H3: Symulacja Online (Poprawiony Layout).
+    H3: Symulacja Online.
+    Logika Fallback:
+    1. Próba ominięcia przeszkody i lotu do CELU.
+    2. Jeśli cel nieosiągalny -> Automatyczny powrót do STARTU (RTH).
+    3. Jeśli start też nieosiągalny -> Dopiero wtedy Błąd Krytyczny.
     """
     fig, ax = plt.subplots(figsize=(12, 9))
 
-    # --- UKŁAD OKNA ---
-    # right=0.60 -> Zostawiamy 40% szerokości okna na legendę i pasek z prawej strony
-    plt.subplots_adjust(right=0.60, left=0.05, bottom=0.1, top=0.9)
+    plt.subplots_adjust(right=0.75, left=0.05, bottom=0.1, top=0.9)
     setup_dark_theme(fig, ax)
 
     ax.set_title("TRYB ONLINE (H3): Kliknij na trasie, aby dodać przeszkodę!", color='yellow', fontsize=14)
 
-    # 1. Mapa
+    # Mapa
     img = ax.imshow(env.grid.T, origin='lower', cmap=get_city_cmap(), vmin=0, vmax=1)
 
-    # 2. Colorbar (Pełna wysokość)
-    # shrink=1.0 sprawia, że pasek jest tak wysoki jak oś Y wykresu
-    cbar = fig.colorbar(img, ax=ax, location='right', pad=0.05, shrink=0.50, anchor=(0.35, 0.75))
+    # Colorbar
+    cbar = fig.colorbar(img, ax=ax, location='right', fraction=0.046, pad=0.045, shrink=0.75, anchor=(0.0, 1.0))
     cbar.set_ticks([0, 0.5, 1])
     cbar.set_ticklabels(['Bezpiecznie', 'Ryzyko', 'BUDYNEK'])
     cbar.ax.yaxis.set_tick_params(color='white', labelcolor='white')
-    # Label paska
-    cbar.set_label('Poziom Ryzyka', color='white', labelpad=15)
+    cbar.set_label('Poziom Ryzyka', color='white', labelpad=10)
 
-    # 3. Trasa Startowa (W=20)
+    # Trasa Startowa
     path_global, _ = search_func(env, start, goal, risk_weight=20.0)
 
     if not path_global:
         print("Błąd: Nie znaleziono trasy startowej.")
         return
 
-    # Wygładzamy od razu
     gx_smooth, gy_smooth = smooth_path_bspline(path_global)
 
-    # --- ELEMENTY WYKRESU ---
-
-    # A. Pierwotny Plan - CZARNY, GRUBY, WYRAŹNY
-    line_global, = ax.plot(gx_smooth, gy_smooth,
-                           color='black', linestyle='--', linewidth=2.5, alpha=0.8,
+    # Elementy wykresu
+    line_global, = ax.plot(gx_smooth, gy_smooth, color='black', linestyle='--', linewidth=2.5, alpha=0.8,
                            label='Pierwotny Plan')
-
-    # B. Droga Przebyta
     line_flown, = ax.plot([], [], color='lime', linewidth=3, label='Droga Przebyta', zorder=3)
-
-    # C. Replanowana
     line_new, = ax.plot([], [], color='cyan', linewidth=3, label='Replanowana Trasa',
                         path_effects=[pe.withStroke(linewidth=5, foreground="blue")], zorder=4)
 
-    # Markery
     ax.scatter([start[0]], [start[1]], color='lime', s=150, label='Start', edgecolors='black', zorder=5)
-    ax.scatter([goal[0]], [goal[1]], color='magenta', marker='X', s=150, label='Cel', edgecolors='black', zorder=5)
+    goal_marker = ax.scatter([goal[0]], [goal[1]], color='magenta', marker='X', s=150, label='Cel', edgecolors='black',
+                             zorder=5)
+    drone_marker, = ax.plot([], [], 'o', color='yellow', markersize=12, label='Wykrycie (5m)', markeredgecolor='black',
+                            zorder=6)
 
-    drone_marker, = ax.plot([], [], 'o', color='yellow', markersize=12, label='Wykrycie (5m przed)',
-                            markeredgecolor='black', zorder=6)
-
-    # --- LEGENDA H3 ---
-    # bbox_to_anchor=(1.35, 1.0) -> Przesunięta mocno w prawo, poza colorbar
-    legend = ax.legend(
-        loc='upper left',
-        bbox_to_anchor=(1.04, 0.3),
-        facecolor='#333333', edgecolor='white', title="Legenda"
-    )
+    # Legenda
+    legend = ax.legend(loc='lower left', bbox_to_anchor=(1.04, 0.0), facecolor='#333333', edgecolor='white',
+                       title="Legenda H3")
     plt.setp(legend.get_texts(), color='white')
     plt.setp(legend.get_title(), color='white')
 
@@ -275,9 +262,9 @@ def run_online_simulation(
             return
 
         click_x, click_y = int(event.xdata), int(event.ydata)
-        print(f"\n[ONLINE] Wykryto kliknięcie w: ({click_x}, {click_y})")
+        print(f"\n[ONLINE] Kliknięcie w: ({click_x}, {click_y})")
 
-        # Dodajemy przeszkodę
+        # 1. Dodajemy przeszkodę
         OBSTACLE_RADIUS = 8
         env.add_dynamic_risk_zone(click_x, click_y, radius=OBSTACLE_RADIUS)
         img.set_data(env.grid.T)
@@ -294,45 +281,36 @@ def run_online_simulation(
                 break
 
         if collision_idx == -1:
-            print("[ONLINE] Brak kolizji na trasie. Zagrożenie jest za daleko (>5m).")
-            print("[ONLINE] Kontynuuję lot wg pierwotnego planu.")
-
+            print("[ONLINE] Zagrożenie daleko. Ignoruję.")
             ax.set_title("Zagrożenie poza zasięgiem (>5m).\nKontynuuję pierwotną trasę.", color='lime', fontsize=14)
-            # Opcjonalnie: Możemy narysować, że cała trasa została przebyta (zamienić czarną na zieloną)
             line_flown.set_data(gx_smooth, gy_smooth)
-
             state["clicked"] = True
             fig.canvas.draw()
-            return  # KONIEC - nie replanujemy!
+            return
 
-        # if collision_idx == -1:
-        #     closest_dist = float('inf')
-        #     for i, (px, py) in enumerate(path_global):
-        #         d = np.sqrt((px - click_x) ** 2 + (py - click_y) ** 2)
-        #         if d < closest_dist:
-        #             closest_dist = d
-        #             collision_idx = i
-        #     drone_idx = max(0, collision_idx - SENSOR_RANGE)
-        # else:
-        #     drone_idx = max(0, collision_idx)
-
-        # --- JEŚLI JEST KOLIZJA (Poniżej wykonuje się tylko gdy zagrożenie jest blisko) ---
-
-        # Cofamy się o 5m od momentu wejścia w strefę (symulacja czasu reakcji)
         drone_idx = max(0, collision_idx - SENSOR_RANGE)
         current_drone_pos = path_global[drone_idx]
 
-        print(f"[ONLINE] Wykryto zagrożenie! Replanowanie od: {current_drone_pos}")
+        # Sprawdzenie czy dron żyje
+        dist_to_drone = np.sqrt((click_x - current_drone_pos[0]) ** 2 + (click_y - current_drone_pos[1]) ** 2)
+        if dist_to_drone <= OBSTACLE_RADIUS:
+            print("[ONLINE] ALERT: Dron zniszczony.")
+            ax.set_title("POZYCJA ZAGROŻONA! Dron zniszczony.", color='red', fontsize=14)
+            drone_marker.set_data([current_drone_pos[0]], [current_drone_pos[1]])
+            state["clicked"] = True
+            fig.canvas.draw()
+            return
 
-        # Replanowanie (W=50)
-        path_local, _ = search_func(env, current_drone_pos, goal, risk_weight=50.0)
-        current_drone_pos = path_global[drone_idx]
-        print(f"[ONLINE] Replanowanie od: {current_drone_pos}")
+        # ======================================================================
+        # STRATEGIA REPLANOWANIA (FALLBACK)
+        # ======================================================================
+        print(f"[ONLINE] Replanowanie z {current_drone_pos} do CELU {goal}")
 
-        path_local, _ = search_func(env, current_drone_pos, goal, risk_weight=50.0)
+        # KROK 1: Próba lotu do CELU (Meta)
+        path_to_goal, _ = search_func(env, current_drone_pos, goal, risk_weight=50.0)
 
-        if path_local:
-            # Rysowanie
+        if path_to_goal:
+            # SUKCES: Omijamy przeszkodę i lecimy do celu
             flown_raw = path_global[:drone_idx + 1]
             if len(flown_raw) > 2:
                 fx, fy = smooth_path_bspline(flown_raw)
@@ -341,13 +319,41 @@ def run_online_simulation(
                 fy = [p[1] for p in flown_raw]
             line_flown.set_data(fx, fy)
 
-            nx, ny = smooth_path_bspline(path_local)
+            nx, ny = smooth_path_bspline(path_to_goal)
             line_new.set_data(nx, ny)
 
             drone_marker.set_data([current_drone_pos[0]], [current_drone_pos[1]])
-            ax.set_title(f"ZAGROŻENIE OMINIĘTE!\nReakcja 5m przed strefą.", color='lime', fontsize=14)
+            ax.set_title("ZAGROŻENIE OMINIĘTE! Lot do celu.", color='lime', fontsize=14)
+
         else:
-            ax.set_title("BŁĄD KRYTYCZNY: Brak drogi!", color='red', fontsize=14)
+            # PORAŻKA KROKU 1: Cel zablokowany -> Próba powrotu do STARTU
+            print("[ONLINE] Cel nieosiągalny! Próba powrotu do STARTU...")
+            path_rth, _ = search_func(env, current_drone_pos, start, risk_weight=20.0)
+
+            if path_rth:
+                # SUKCES RTH: Wracamy do bazy
+                flown_raw = path_global[:drone_idx + 1]
+                if len(flown_raw) > 2:
+                    fx, fy = smooth_path_bspline(flown_raw)
+                else:
+                    fx = [p[0] for p in flown_raw]
+                    fy = [p[1] for p in flown_raw]
+                line_flown.set_data(fx, fy)
+
+                nx, ny = smooth_path_bspline(path_rth)
+                line_new.set_data(nx, ny)
+                line_new.set_color('orange')
+                line_new.set_label('Powrót (Awaryjny)')
+
+                # Aktualizacja legendy
+                ax.legend(loc='lower left', bbox_to_anchor=(1.04, 0.0), facecolor='#333333', edgecolor='white')
+
+                drone_marker.set_data([current_drone_pos[0]], [current_drone_pos[1]])
+                ax.set_title("CEL ZABLOKOWANY! Awaryjny powrót do bazy.", color='orange', fontsize=14)
+                goal_marker.set_facecolor('gray')  # Cel nieaktywny
+            else:
+                # PORAŻKA CAŁKOWITA: Nie da się wrócić (bardzo rzadkie)
+                ax.set_title("BŁĄD KRYTYCZNY: Uwięziony!", color='red', fontsize=14)
 
         state["clicked"] = True
         fig.canvas.draw()
