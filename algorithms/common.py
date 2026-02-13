@@ -1,4 +1,4 @@
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, Callable, Dict, Any
 import math
 from environment.grid_map import GridMap
 
@@ -99,3 +99,63 @@ def calculate_dynamic_penalty(
                 break
 
     return penalty
+
+
+def calculate_segment_risk(path: List[Tuple[int, int]], env: GridMap) -> float:
+    """Oblicza całkowite ryzyko na ścieżce."""
+    total_risk = 0.0
+    for (x, y) in path:
+        total_risk += env.get_cost(x, y)
+    return total_risk
+
+
+def calculate_path_length(path: List[Tuple[int, int]]) -> float:
+    """Oblicza długość ścieżki."""
+    length = 0.0
+    for i in range(1, len(path)):
+        p1 = path[i - 1]
+        p2 = path[i]
+        length += math.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
+    return length
+
+
+def generate_analysis_table(
+        env: GridMap,
+        start_pos: Tuple[int, int],
+        target_pos: Tuple[int, int],
+        search_func: Callable,
+        base_len: float,
+        base_risk: float,
+        collision_radius: float,
+        table_title: str = "ANALIZA"
+) -> None:
+    """
+    Wspólna funkcja do generowania tabeli analizy dla różnych wag ryzyka.
+    Używana zarówno w trybie offline jak i online.
+    """
+    risk_weights = [float(x) for x in range(0, 101, 5)]
+
+    print("-" * 90)
+    print(f"{table_title}")
+    print("-" * 90)
+    print(f"Baza: Dystans: {base_len:.2f} | Ryzyko: {base_risk:.2f}")
+    print("-" * 90)
+    print(f"{'Waga (W)':<10} | {'Dystans':<10} | {'Koszt [%]':<10} | {'Ryzyko':<10} | {'Zmiana Ryzyka [%]':<20}")
+    print("-" * 90)
+
+    for w in risk_weights:
+        _, stats = search_func(env, start_pos, target_pos, risk_weight=w, turn_penalty=20.0, drone_radius=collision_radius)
+
+        if stats['found'] and base_len > 0:
+            len_inc = ((stats['length'] - base_len) / base_len) * 100
+
+            risk_change = 0.0
+            if base_risk > 0:
+                risk_change = ((stats['risk'] - base_risk) / base_risk) * 100
+
+            print(
+                f"{w:<10.1f} | {stats['length']:<10.2f} | +{len_inc:<9.2f} | {stats['risk']:<10.2f} | {risk_change:<+19.2f}")
+        else:
+            print(f"{w:<10.1f} | BRAK TRASY")
+
+    print("-" * 90)

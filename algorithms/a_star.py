@@ -22,9 +22,6 @@ def run_astar(
     visited = set()
     nodes_expanded = 0
 
-    # Promień drona
-    #DRONE_RADIUS = 1.0
-
     while open_list:
         current = heapq.heappop(open_list)
         nodes_expanded += 1

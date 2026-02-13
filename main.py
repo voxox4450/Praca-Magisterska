@@ -1,28 +1,19 @@
-import matplotlib
-
-matplotlib.use('TkAgg')
-import matplotlib.pyplot as plt
-
 from environment.grid_map import GridMap
 from algorithms.dijkstra import run_dijkstra
 from algorithms.a_star import run_astar
 from algorithms.a_star_risk import run_risk_astar
 from visualization.plotter import plot_simulation, plot_interactive_risk, run_online_simulation
+from algorithms.common import generate_analysis_table
 from typing import Tuple, List, Dict, Any
 
 
 def main() -> None:
-    print(f"==========================================")
-    print(f"   SYSTEM PLANOWANIA TRAS BSP (Mgr)      ")
-    print(f"==========================================")
+    print(f"="*32)
+    print(f"   SYSTEM PLANOWANIA TRAS BSP     ")
+    print(f"="*32)
     print("WYBIERZ TRYB PRACY:")
-    print("1. Wersja OFFLINE (Hipoteza H1 - Analiza Statyczna)")
-    print("   - Generowanie tabeli (Wagi 0-100)")
-    print("   - Porównanie wizualne")
-    print("2. Wersja ONLINE (Hipoteza H3 - Dynamiczna Reakcja)")
-    print("   - Symulacja lotu")
-    print("   - Dodawanie zagrożeń kliknięciem")
-    print("   - Tabela generowana dynamicznie po wykryciu przeszkody")
+    print("1. Wersja OFFLINE ")
+    print("2. Wersja ONLINE ")
 
     mode = input("\nTwój wybór (1 lub 2): ").strip()
 
@@ -44,9 +35,9 @@ def main() -> None:
 def get_user_difficulty() -> float:
     """Wspólna funkcja wyboru trudności dla obu trybów."""
     print("\nWYBIERZ POZIOM TRUDNOŚCI OTOCZENIA:")
-    print("1. Mało przeszkód (5%)  - Teren otwarty")
-    print("2. Średnio (15%)        - Teren zurbanizowany (Zalecane)")
-    print("3. Dużo przeszkód (30%) - Gęsta zabudowa")
+    print("1. Mało przeszkód (5%)")
+    print("2. Średnio (15%)      ")
+    print("3. Dużo przeszkód (30%)")
 
     while True:
         choice = input("Wybór (1-3): ").strip()
@@ -79,35 +70,19 @@ def run_offline_mode(size: int, collision_radius: float) -> None:
     # 2. A* Standard
     path_a, stats_a = run_astar(env, start_pos, goal_pos)
 
-    # 3. Risk A* (Seria pomiarowa 0 - 100)
-    risk_weights = [float(x) for x in range(0, 101, 5)]
+    # 3. Generowanie tabeli analizy dla Risk A* (używamy wspólnej funkcji)
+    generate_analysis_table(
+        env=env,
+        start_pos=start_pos,
+        target_pos=goal_pos,
+        search_func=run_risk_astar,
+        base_len=base_len,
+        base_risk=base_risk,
+        collision_radius=collision_radius,
+        table_title="ANALIZA TRYBU OFFLINE (H1)"
+    )
 
-    print("-" * 80)
-    print(f"{'Waga (W)':<10} | {'Dystans':<10} | {'Koszt [%]':<10} | {'Ryzyko':<10} | {'Poprawa [%]':<12}")
-    print("-" * 80)
-
-    for w in risk_weights:
-        _, stats = run_risk_astar(env, start_pos, goal_pos, risk_weight=w)
-
-        if stats['found'] and base_len > 0:
-            len_inc = ((stats['length'] - base_len) / base_len) * 100
-
-            risk_red = 0.0
-            if base_risk > 0:
-                risk_red = ((base_risk - stats['risk']) / base_risk) * 100
-
-            print(
-                f"{w:<10.1f} | {stats['length']:<10.2f} | +{len_inc:<9.2f} | {stats['risk']:<10.2f} | -{risk_red:<11.2f}")
-        else:
-            print(f"{w:<10.1f} | BRAK TRASY")
-
-    print("-" * 80)
-
-    print("\n>>> OTWIERANIE OKIEN WIZUALIZACJI...")
-    print("1. Dijkstra")
-    print("2. A* Standard")
-    print("3. Risk A* Interaktywny (Suwak)")
-    print("ZAMKNIJ OKNO Z SUWAKIEM, ABY ZAKOŃCZYĆ.")
+    print("\n>>> OTWIERANIE OKIEN WIZUALIZACJI OFFLINE")
 
     if path_d:
         plot_simulation(env, path_d, stats_d, "1. Dijkstra (Referencja)", block=False, use_smoothing=False)
@@ -125,12 +100,7 @@ def run_online_mode(size: int, collision_radius: float) -> None:
     # Wybór trudności
     density = get_user_difficulty()
 
-    print("\n[INFO] URUCHAMIANIE WIZUALIZACJI INTERAKTYWNEJ...")
-    print("Instrukcja:")
-    print("1. Zobaczysz zaplanowaną trasę (Biała/Czarna linia).")
-    print("2. KLIKNIJ na trasie (przed dronem), aby wywołać zagrożenie.")
-    print("3. W konsoli pojawi się tabela analizy dla tego konkretnego zdarzenia.")
-    print("4. Na mapie zobaczysz nową trasę (Cyjanową) lub powrót do bazy (Pomarańczową).")
+    print("\n[INFO] URUCHAMIANIE WIZUALIZACJI ONLINE")
 
     # Tworzymy mapę z wybraną gęstością
     env = GridMap(width=size, height=size, risk_zones_count=8, obstacle_density=density)

@@ -4,9 +4,9 @@ from matplotlib.widgets import Slider
 from matplotlib.colors import LinearSegmentedColormap
 import numpy as np
 import scipy.interpolate as interp
-import math
 from typing import List, Tuple, Callable, Any, Dict
 from environment.grid_map import GridMap
+from algorithms.common import calculate_segment_risk, calculate_path_length, generate_analysis_table
 
 
 def get_city_cmap():
@@ -50,24 +50,6 @@ def smooth_path_bspline(path: List[Tuple[int, int]]) -> Tuple[np.ndarray, np.nda
         return np.array(x), np.array(y)
 
 
-# Funkcje pomocnicze do tabeli w trybie Online
-def calculate_segment_risk(path: List[Tuple[int, int]], env: GridMap) -> float:
-    total_risk = 0.0
-    for (x, y) in path:
-        total_risk += env.get_cost(x, y)
-    return total_risk
-
-
-def calculate_path_length(path: List[Tuple[int, int]]) -> float:
-    length = 0.0
-    for i in range(1, len(path)):
-        p1 = path[i - 1]
-        p2 = path[i]
-        length += math.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
-    return length
-
-
-# Funkcje wizualizacji Offline (zostawiamy bez zmian dla kompatybilności z main.py)
 def plot_simulation(
         grid_map: GridMap,
         path: List[Tuple[int, int]],
@@ -187,7 +169,7 @@ def plot_interactive_risk(
         else:
             line_raw.set_data([], [])
             line_smooth.set_data([], [])
-            ax.set_title("Brak trasy!", color='red')
+            ax.set_title(f"BRAK TRASY (W={w:.0f})", fontsize=14, color='red')
         fig.canvas.draw_idle()
 
     risk_slider.on_changed(update)
@@ -196,26 +178,16 @@ def plot_interactive_risk(
     return risk_slider
 
 
-# --- GŁÓWNA FUNKCJA DLA H3 (POPRAWIONA) ---
 def run_online_simulation(
         env: GridMap,
         start: Tuple[int, int],
         goal: Tuple[int, int],
         search_func: Callable,
-        collision_radius: float = 3.0
+        collision_radius: float
 ) -> None:
-    """
-    H3: Symulacja Online z SUWAKIEM.
-    Poprawki:
-    1. Precyzyjne wykrywanie (14m dystans).
-    2. Tabela ze znakami +/-.
-    3. Suwak startuje od 20.
-    """
     fig, ax = plt.subplots(figsize=(12, 9))
-    plt.subplots_adjust(right=0.75, left=0.05, bottom=0.20, top=0.9)
+    plt.subplots_adjust(bottom=0.12, right=0.68, left=0.05, top=0.9)
     setup_dark_theme(fig, ax)
-
-    ax.set_title("TRYB ONLINE: Kliknij na trasie, aby dodać przeszkodę!", color='yellow', fontsize=14)
 
     # Mapa
     img = ax.imshow(env.grid.T, origin='lower', cmap=get_city_cmap(), vmin=0, vmax=1)
@@ -307,14 +279,14 @@ def run_online_simulation(
         # ---------------------------------------------------------
         # NOWA LOGIKA WYKRYWANIA (Matematyka: 14 metrów)
         # ---------------------------------------------------------
-        DRONE_RADIUS = 1.0  # Promień drona
+        DRONE_RADIUS = collision_radius - 2 # Promień drona
         SENSOR_RANGE = 5.0  # Zasięg czujnika
 
         # Dystans graniczny = Promień Przeszkody + Promień Drona + Zasięg Czujnika
         # = 8 + 1 + 5 = 14.0
         LIMIT_DIST = OBSTACLE_RADIUS + DRONE_RADIUS + SENSOR_RANGE
 
-        collision_idx = -1
+        collision_idx = 0
         # Szukamy PIERWSZEGO punktu, gdzie dron widzi przeszkodę
         for i, (px, py) in enumerate(path_global):
             dist_to_center = np.sqrt((px - click_x) ** 2 + (py - click_y) ** 2)
@@ -375,35 +347,22 @@ def run_online_simulation(
 
         update_route(risk_slider.val)
 
-        # Tabela w konsoli
+        # UŻYCIE WSPÓLNEJ FUNKCJI DO GENEROWANIA TABELI
         print("\n--- GENEROWANIE TABELI ANALIZY (W KONSOLI) ---")
         path_remainder = path_global[drone_idx:]
         base_risk = calculate_segment_risk(path_remainder, env)
         base_len = calculate_path_length(path_remainder)
 
-        print("-" * 90)
-        print(f"Baza (Bez reakcji): Dystans: {base_len:.2f} | Ryzyko: {base_risk:.2f}")
-        print("-" * 90)
-        print(f"{'Waga (W)':<10} | {'Dystans':<10} | {'Koszt [%]':<10} | {'Ryzyko':<10} | {'Zmiana Ryzyka [%]':<20}")
-        print("-" * 90)
-
-        for w_test in range(0, 101, 5):
-            p_test, s_test = search_func(env, current_drone_pos, sim_state["target_pos"], risk_weight=float(w_test), turn_penalty=20.0, drone_radius=collision_radius)
-            if s_test['found']:
-                # Obliczamy procentową zmianę
-                if base_risk > 0:
-                    pct_change = ((s_test['risk'] - base_risk) / base_risk) * 100
-                else:
-                    pct_change = 0.0
-
-                cost_inc = ((s_test['length'] - base_len) / base_len) * 100
-
-                # Używamy formatowania {:+.1f}, które samo doda "+" dla wzrostu i "-" dla spadku
-                print(
-                    f"{w_test:<10} | {s_test['length']:<10.2f} | +{cost_inc:<9.1f} | {s_test['risk']:<10.1f} | {pct_change:<+19.1f}")
-            else:
-                print(f"{w_test:<10} | BRAK TRASY")
-        print("-" * 90)
+        generate_analysis_table(
+            env=env,
+            start_pos=current_drone_pos,
+            target_pos=sim_state["target_pos"],
+            search_func=search_func,
+            base_len=base_len,
+            base_risk=base_risk,
+            collision_radius=collision_radius,
+            table_title="ANALIZA TRYBU ONLINE (H3)"
+        )
 
     cid = fig.canvas.mpl_connect('button_press_event', onclick)
     plt.show(block=True)
