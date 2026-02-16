@@ -5,10 +5,16 @@ from scipy.ndimage import distance_transform_edt
 
 
 class GridMap:
-    def __init__(self, width: int, height: int, risk_zones_count: int = 5, obstacle_density: float = 0.15) -> None:
+    def __init__(self, width: int, height: int,
+                 start_pos: Tuple[int, int],
+                 goal_pos: Tuple[int, int],
+                 risk_zones_count: int = 5,
+                 obstacle_density: float = 0.15) -> None:
         self.width = width
         self.height = height
         self.grid = np.zeros((width, height), dtype=np.float64)
+        self.start_pos = start_pos
+        self.goal_pos = goal_pos
 
         # Macierz odległości (do kolizji ze statycznymi budynkami)
         self.dist_matrix = np.zeros((width, height), dtype=np.float64)
@@ -16,17 +22,17 @@ class GridMap:
         # Lista przechowująca dynamiczne zagrożenia: (x, y, radius)
         self.dynamic_obstacles: List[Tuple[int, int, int]] = []
 
-        self._generate_urban_layout(obstacle_density)
+        self._generate_urban_layout(obstacle_density, start_pos, goal_pos)
 
-    def _generate_urban_layout(self, density: float) -> None:
+    def _generate_urban_layout(self, density: float, start_pos, goal_pos) -> None:
         total_pixels = self.width * self.height
         target_pixels = int(total_pixels * density)
         current_pixels = 0
         attempts = 0
 
         # Pozycje Startu i Celu (muszą być zgrane z main.py)
-        start_pos = (5, 5)
-        goal_pos = (95, 95)
+        #start_pos = (5, 5)
+        #goal_pos = (95, 95)
 
         # Wymagany odstęp: 3 metry wymogu + 1 metr zapasu = 4.0
         SAFE_MARGIN = 4.0
