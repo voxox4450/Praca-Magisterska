@@ -10,15 +10,27 @@ from algorithms.common import calculate_segment_risk, calculate_path_length, gen
 
 
 def get_city_cmap():
-    """Paleta: Biały -> Czerwony -> Czarny"""
+    """
+    Paleta płynna (więcej pomarańczu):
+    Biały -> Żółty -> Pomarańczowy -> Czerwony -> Czarny
+    """
     colors = [
-        (0.0, (1.0, 1.0, 1.0)),
-        (0.01, (1.0, 0.9, 0.9)),
-        (0.99, (0.8, 0.0, 0.0)),
-        (0.991, (0.0, 0.0, 0.0)),
-        (1.0, (0.0, 0.0, 0.0))
+        # WARTOŚĆ | KOLOR (R, G, B)
+        (0.0,   (1.0, 1.0, 1.0)),   # 0.0  = Biały
+        (0.01,  (1.0, 1.0, 0.0)),   # 0.01 = Żółty (Start strefy)
+
+        # Szybciej przechodzimy w pomarańcz (już przy 0.4, a nie 0.6)
+        # To da efekt "więcej pomarańczowego" wokół budynków
+        (0.4,   (1.0, 0.5, 0.0)),   # 0.4  = Pomarańczowy
+
+        # Czerwień zaczyna się przy 0.8
+        (0.8,   (1.0, 0.0, 0.0)),   # 0.8  = Czysta Czerwień
+
+        (0.99,  (0.5, 0.0, 0.0)),   # 0.99 = Ciemna Czerwień
+        (0.991, (0.0, 0.0, 0.0)),   # Odcięcie
+        (1.0,   (0.0, 0.0, 0.0))    # 1.0  = Czarny
     ]
-    return LinearSegmentedColormap.from_list("CityMap", colors)
+    return LinearSegmentedColormap.from_list("CityMapOrange", colors)
 
 
 def setup_dark_theme(fig, ax):
@@ -59,13 +71,14 @@ def plot_simulation(
         use_smoothing: bool = False
 ) -> None:
     fig, ax = plt.subplots(figsize=(12, 9))
-    plt.subplots_adjust(right=0.75, left=0.05, bottom=0.1, top=0.9)
+    plt.subplots_adjust(right=0.85, left=0.15, bottom=0.12, top=0.9)
     setup_dark_theme(fig, ax)
     img = ax.imshow(grid_map.grid.T, origin='lower', cmap=get_city_cmap(), vmin=0, vmax=1)
-    cbar = fig.colorbar(img, ax=ax, location='right', pad=0.05, shrink=0.80, anchor=(0.0, 1.0))
+    cbar = fig.colorbar(img, ax=ax, location='right', fraction=0.046, pad=0.05, shrink=0.80, anchor=(0.0, 1.0))
     cbar.set_ticks([0, 0.5, 1])
     cbar.set_ticklabels(['Bezpiecznie', 'Ryzyko', 'BUDYNEK'])
     cbar.ax.yaxis.set_tick_params(color='white', labelcolor='white')
+    cbar.set_label('Poziom Ryzyka', color='white', labelpad=10)
     if path:
         path_x = [p[0] for p in path]
         path_y = [p[1] for p in path]
@@ -84,10 +97,10 @@ def plot_simulation(
         ax.scatter([path_x[-1]], [path_y[-1]], color='magenta', marker='X', s=150, label='Cel', edgecolors='black',
                    zorder=5)
 
-    # === 2. LEGENDA ELEMENTÓW (PRZYWRÓCONA NA DOLE) ===
+    #LEGENDA ELEMENTÓW
     legend = ax.legend(
         loc='lower left',
-        bbox_to_anchor=(1.04, 0.0),
+        bbox_to_anchor=(1.05, -0.01),
         facecolor='#333333',
         edgecolor='white',
         title="Elementy Mapy"
@@ -111,13 +124,14 @@ def plot_interactive_risk(
         search_func: Callable
 ) -> Slider:
     fig, ax = plt.subplots(figsize=(12, 9))
-    plt.subplots_adjust(bottom=0.20, right=0.65, left=0.05, top=0.9)
+    plt.subplots_adjust(bottom=0.12, right=0.85, left=0.15, top=0.90)
     setup_dark_theme(fig, ax)
     img = ax.imshow(grid_map.grid.T, origin='lower', cmap=get_city_cmap(), vmin=0, vmax=1)
-    cbar = fig.colorbar(img, ax=ax, location='right', pad=0.05, shrink=0.80, anchor=(0.0, 1.0))
+    cbar = fig.colorbar(img, ax=ax, location='right', fraction=0.046, pad=0.05, shrink=0.80, anchor=(0.0, 1.0))
     cbar.set_ticks([0, 0.5, 1])
     cbar.set_ticklabels(['Bezpiecznie', 'Ryzyko', 'BUDYNEK'])
     cbar.ax.yaxis.set_tick_params(color='white', labelcolor='white')
+    cbar.set_label('Poziom Ryzyka', color='white', labelpad=10)
     line_raw, = ax.plot([], [], color='gray', linestyle='--', linewidth=1, alpha=0.5)
     line_smooth, = ax.plot([], [], color='cyan', linewidth=3, label='Trasa',
                            path_effects=[pe.withStroke(linewidth=4, foreground="blue")])
@@ -125,10 +139,10 @@ def plot_interactive_risk(
     ax.scatter([start[0]], [start[1]], color='lime', s=150, label='Start', edgecolors='black', zorder=5)
     ax.scatter([goal[0]], [goal[1]], color='magenta', marker='X', s=150, label='Cel', edgecolors='black', zorder=5)
 
-    # === 2. LEGENDA ELEMENTÓW (PRZYWRÓCONA) ===
+    # LEGENDA ELEMENTÓW
     legend = ax.legend(
         loc='lower left',
-        bbox_to_anchor=(1.04, 0.0),
+        bbox_to_anchor=(1.05, -0.01),
         facecolor='#333333',
         edgecolor='white',
         title="Elementy Mapy"
@@ -137,7 +151,7 @@ def plot_interactive_risk(
     plt.setp(legend.get_title(), color='white')
 
     # Suwak
-    ax_slider = plt.axes([0.15, 0.05, 0.6, 0.03], facecolor='#333333')
+    ax_slider = plt.axes([0.15, 0.04, 0.7, 0.04], facecolor='#333333')
     risk_slider = Slider(
         ax=ax_slider,
         label='Waga Ryzyka (W)',
@@ -152,7 +166,6 @@ def plot_interactive_risk(
 
     def update(val):
         w = risk_slider.val
-        # Tutaj wywołujemy algorytm
         path, stats = search_func(grid_map, start, goal, risk_weight=w, turn_penalty=20.0)
 
         if path:
