@@ -9,23 +9,16 @@ from environment.grid_map import GridMap
 from algorithms.common import calculate_segment_risk, calculate_path_length, generate_analysis_table
 
 
-def get_city_cmap():
+def get_city_cmap() -> LinearSegmentedColormap:
     """
-    Paleta płynna (więcej pomarańczu):
     Biały -> Żółty -> Pomarańczowy -> Czerwony -> Czarny
     """
     colors = [
         # WARTOŚĆ | KOLOR (R, G, B)
         (0.0,   (1.0, 1.0, 1.0)),   # 0.0  = Biały
-        (0.01,  (1.0, 1.0, 0.0)),   # 0.01 = Żółty (Start strefy)
-
-        # Szybciej przechodzimy w pomarańcz (już przy 0.4, a nie 0.6)
-        # To da efekt "więcej pomarańczowego" wokół budynków
+        (0.01,  (1.0, 1.0, 0.0)),   # 0.01 = Żółty
         (0.4,   (1.0, 0.5, 0.0)),   # 0.4  = Pomarańczowy
-
-        # Czerwień zaczyna się przy 0.8
         (0.8,   (1.0, 0.0, 0.0)),   # 0.8  = Czysta Czerwień
-
         (0.99,  (0.5, 0.0, 0.0)),   # 0.99 = Ciemna Czerwień
         (0.991, (0.0, 0.0, 0.0)),   # Odcięcie
         (1.0,   (0.0, 0.0, 0.0))    # 1.0  = Czarny
@@ -33,7 +26,7 @@ def get_city_cmap():
     return LinearSegmentedColormap.from_list("CityMapOrange", colors)
 
 
-def setup_dark_theme(fig, ax):
+def setup_dark_theme(fig, ax) -> None:
     fig.patch.set_facecolor('#1e1e1e')
     ax.set_facecolor('#1e1e1e')
     ax.tick_params(colors='white')
@@ -88,7 +81,6 @@ def plot_simulation(
             ax.plot(smooth_x, smooth_y, color='cyan', linewidth=3, label='Trajektoria (Smooth)',
                     path_effects=[pe.withStroke(linewidth=5, foreground="blue")])
         else:
-            # DLA DIJKSTRA / STANDARD A*: Tylko jedna, kanciasta linia (Bezpieczna)
             ax.plot(path_x, path_y, color='cyan', linewidth=3, label='Trasa',
                     path_effects=[pe.withStroke(linewidth=5, foreground="blue")])
 
@@ -199,25 +191,33 @@ def run_online_simulation(
         collision_radius: float
 ) -> None:
     fig, ax = plt.subplots(figsize=(12, 9))
-    plt.subplots_adjust(bottom=0.12, right=0.68, left=0.05, top=0.9)
+    plt.subplots_adjust(bottom=0.12, right=0.80, left=0.15, top=0.90)
     setup_dark_theme(fig, ax)
 
     # Mapa
     img = ax.imshow(env.grid.T, origin='lower', cmap=get_city_cmap(), vmin=0, vmax=1)
 
     # Colorbar
-    cbar = fig.colorbar(img, ax=ax, location='right', fraction=0.046, pad=0.045, shrink=0.70, anchor=(0.0, 1.0))
+    cbar = fig.colorbar(img, ax=ax, location='right', fraction=0.048, pad=0.045, shrink=0.72, anchor=(0.0, 1.0))
     cbar.set_ticks([0, 0.5, 1])
     cbar.set_ticklabels(['Bezpiecznie', 'Ryzyko', 'BUDYNEK'])
     cbar.ax.yaxis.set_tick_params(color='white', labelcolor='white')
     cbar.set_label('Poziom Ryzyka', color='white', labelpad=10)
 
     # Trasa Startowa (W=20)
-    path_global, _ = search_func(env, start, goal, risk_weight=20.0, turn_penalty=20.0, drone_radius=collision_radius)
+    path_global, stats_global = search_func(env, start, goal, risk_weight=20.0, turn_penalty=20.0, drone_radius=collision_radius)
 
     if not path_global:
         print("Błąd: Nie znaleziono trasy startowej.")
-        return
+        return False
+
+
+    turns = stats_global.get('turns', 0)
+    initial_title = (f"A* Risk-Aware (W=20) planowana trasa przelotu\n"
+                     f"Dyst: {stats_global['length']:.1f} m | Ryzyko: {stats_global['risk']:.1f} | "
+                     f"Czas: {stats_global['time']:.4f} s | Zakręty: {turns}")
+
+    ax.set_title(initial_title, fontsize=14, color='white', pad=15)
 
     gx_smooth, gy_smooth = smooth_path_bspline(path_global)
 
@@ -234,14 +234,14 @@ def run_online_simulation(
     drone_marker, = ax.plot([], [], 'o', color='yellow', markersize=12, label='Wykrycie (5m)', markeredgecolor='black',
                             zorder=6)
 
-    # Legenda (Przyklejona do dołu)
-    legend = ax.legend(loc='lower left', bbox_to_anchor=(1.04, 0.0), facecolor='#333333', edgecolor='white',
-                       title="Legenda H3")
+    # Legenda
+    legend = ax.legend(loc='lower left', bbox_to_anchor=(1.04, -0.01), facecolor='#333333', edgecolor='white',
+                       title="Legenda Elementów")
     plt.setp(legend.get_texts(), color='white')
     plt.setp(legend.get_title(), color='white')
 
-    # Suwak (Start od 20.0)
-    ax_slider = plt.axes([0.20, 0.05, 0.50, 0.03], facecolor='#333333')
+    # Suwak
+    ax_slider = plt.axes([0.151, 0.04, 0.77, 0.04], facecolor='#333333')
     risk_slider = Slider(ax=ax_slider, label='Waga Ryzyka (W) ', valmin=0.0, valmax=100.0, valinit=20.0, valstep=1.0,
                          color='cyan')
     risk_slider.label.set_color('white')
@@ -258,20 +258,17 @@ def run_online_simulation(
             nx, ny = smooth_path_bspline(path_local)
             line_new.set_data(nx, ny)
 
-            # --- ZMIANA: Pełne statystyki w tytule (Dystans, Ryzyko, Czas, Zakręty) ---
             turns_count = stats.get('turns', 0)
             stats_text = (f"Dyst: {stats['length']:.1f}m | Ryzyko: {stats['risk']:.1f} | "
                           f"Czas: {stats['time']:.4f}s | Zakręty: {turns_count}")
             if sim_state["mode"] == "RTH":
-                # Dodano \n{stats_text}
-                ax.set_title(f"TRYB POWROTU (RTH) | W={w:.0f}\n{stats_text}", color='orange', fontsize=14)
+                ax.set_title(f"Tryb Powrotu | W={w:.0f}\n{stats_text}", color='orange', fontsize=14, pad=15)
                 line_new.set_color('orange')
             else:
-                # Dodano \n{stats_text}
-                ax.set_title(f"OMIJANIE PRZESZKODY | W={w:.0f}\n{stats_text}", color='lime', fontsize=14)
+                ax.set_title(f"OMIJANIE PRZESZKODY | W={w:.0f}\n{stats_text}", color='lime', fontsize=14, pad=15)
                 line_new.set_color('cyan')
         else:
-            ax.set_title(f"DLA W={w:.0f} DRON JEST UWIĘZIONY!", color='red', fontsize=14)
+            ax.set_title(f"DRON JEST UWIĘZIONY!", color='red', fontsize=14, pad=15)
             line_new.set_data([], [])
         fig.canvas.draw_idle()
 
@@ -282,7 +279,7 @@ def run_online_simulation(
         if sim_state["clicked"]: return
 
         click_x, click_y = int(event.xdata), int(event.ydata)
-        print(f"\n[ONLINE] Kliknięcie w: ({click_x}, {click_y})")
+        print(f"\n Kliknięcie w: ({click_x}, {click_y})")
 
         # 1. Dodajemy przeszkodę
         OBSTACLE_RADIUS = 8
@@ -300,7 +297,6 @@ def run_online_simulation(
         LIMIT_DIST = OBSTACLE_RADIUS + DRONE_RADIUS + SENSOR_RANGE
 
         collision_idx = 0
-        # Szukamy PIERWSZEGO punktu, gdzie dron widzi przeszkodę
         for i, (px, py) in enumerate(path_global):
             dist_to_center = np.sqrt((px - click_x) ** 2 + (py - click_y) ** 2)
             if dist_to_center <= LIMIT_DIST:
@@ -308,7 +304,7 @@ def run_online_simulation(
                 break
 
         if collision_idx == -1:
-            print("[ONLINE] Zagrożenie daleko.")
+            print("Zagrożenie daleko.")
             ax.set_title("Zagrożenie poza zasięgiem (>5m).", color='lime', fontsize=14)
             line_flown.set_data(gx_smooth, gy_smooth)
             sim_state["clicked"] = True
@@ -316,7 +312,7 @@ def run_online_simulation(
             fig.canvas.draw()
             return
 
-        drone_idx = collision_idx  # To jest pozycja drona W MOMENCIE wykrycia
+        drone_idx = collision_idx
         current_drone_pos = path_global[drone_idx]
 
         # Rysujemy przebytą
@@ -329,11 +325,10 @@ def run_online_simulation(
         line_flown.set_data(fx, fy)
         drone_marker.set_data([current_drone_pos[0]], [current_drone_pos[1]])
 
-        # Sprawdzenie zniszczenia (Czy dron już siedzi w ogniu?)
         # Jeśli środek drona jest bliżej niż (Promień przeszkody + Promień drona)
         dist_to_drone = np.sqrt((click_x - current_drone_pos[0]) ** 2 + (click_y - current_drone_pos[1]) ** 2)
         if dist_to_drone <= (OBSTACLE_RADIUS + DRONE_RADIUS):
-            ax.set_title("DRON ZNISZCZONY!", color='red', fontsize=14)
+            ax.set_title("Dron nie wystartował!", color='red', fontsize=14)
             sim_state["clicked"] = True
             sim_state["mode"] = "CRASH"
             fig.canvas.draw()
@@ -346,21 +341,19 @@ def run_online_simulation(
         sim_state["clicked"] = True
 
         if path_check:
-            print("[ONLINE] Cel osiągalny.")
+            print("Cel osiągalny.")
             sim_state["target_pos"] = goal
             sim_state["mode"] = "NORMAL"
             line_new.set_label('Replanowana Trasa')
         else:
-            print("[ONLINE] Cel zablokowany -> RTH.")
+            print("Cel zablokowany")
             sim_state["target_pos"] = start
             sim_state["mode"] = "RTH"
             goal_marker.set_facecolor('gray')
             line_new.set_label('Powrót (Awaryjny)')
-            ax.legend(loc='lower left', bbox_to_anchor=(1.04, 0.0), facecolor='#333333', edgecolor='white')
 
         update_route(risk_slider.val)
 
-        # UŻYCIE WSPÓLNEJ FUNKCJI DO GENEROWANIA TABELI
         print("\n--- GENEROWANIE TABELI ANALIZY (W KONSOLI) ---")
         path_remainder = path_global[drone_idx:]
         base_risk = calculate_segment_risk(path_remainder, env)
