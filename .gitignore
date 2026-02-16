@@ -39,3 +39,5 @@ documentation/
 .DS_Store
 Thumbs.db
 research_results/
+__pycache__/
+*.pyc
