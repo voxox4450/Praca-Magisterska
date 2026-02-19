@@ -7,6 +7,7 @@ import scipy.interpolate as interp
 from typing import List, Tuple, Callable, Any, Dict
 from environment.grid_map import GridMap
 from algorithms.common import calculate_segment_risk, calculate_path_length, generate_analysis_table
+import os
 
 
 def get_city_cmap() -> LinearSegmentedColormap:
@@ -170,7 +171,7 @@ def plot_interactive_risk(
             title_text = (f"A* Risk-Aware (W={w:.0f})\n"
                           f"Dyst: {stats['length']:.1f} m | Ryzyko: {stats['risk']:.1f} | "
                           f"Czas: {stats['time']:.4f} s | Zakręty: {turns_count}")
-            ax.set_title(title_text, fontsize=14)
+            ax.set_title(title_text, fontsize=14, pad=15)
         else:
             line_raw.set_data([], [])
             line_smooth.set_data([], [])
@@ -190,6 +191,14 @@ def run_online_simulation(
         search_func: Callable,
         collision_radius: float
 ) -> None:
+
+    # Trasa Startowa (W=20)
+    path_global, stats_global = search_func(env, start, goal, risk_weight=20.0, turn_penalty=20.0, drone_radius=collision_radius)
+
+    if not path_global:
+        print("Błąd: Nie znaleziono trasy startowej.")
+        return False
+
     fig, ax = plt.subplots(figsize=(12, 9))
     plt.subplots_adjust(bottom=0.12, right=0.80, left=0.15, top=0.90)
     setup_dark_theme(fig, ax)
@@ -203,14 +212,6 @@ def run_online_simulation(
     cbar.set_ticklabels(['Bezpiecznie', 'Ryzyko', 'BUDYNEK'])
     cbar.ax.yaxis.set_tick_params(color='white', labelcolor='white')
     cbar.set_label('Poziom Ryzyka', color='white', labelpad=10)
-
-    # Trasa Startowa (W=20)
-    path_global, stats_global = search_func(env, start, goal, risk_weight=20.0, turn_penalty=20.0, drone_radius=collision_radius)
-
-    if not path_global:
-        print("Błąd: Nie znaleziono trasy startowej.")
-        return False
-
 
     turns = stats_global.get('turns', 0)
     initial_title = (f"A* Risk-Aware (W=20) planowana trasa przelotu\n"
@@ -251,7 +252,11 @@ def run_online_simulation(
 
     def update_route(val):
         if not sim_state["clicked"] or sim_state["mode"] in ["CRASH", "IGNORE", "IDLE"]: return
-        w = risk_slider.val
+
+        if sim_state["mode"] == "RTH":
+            w = 50.0  # Sztywna wysoka waga ryzyka dla trybu powrotu
+        else:
+            w = risk_slider.val # Dynamiczna waga ryzyka dla trybu omijania przeszkody
         path_local, stats = search_func(env, sim_state["drone_pos"], sim_state["target_pos"], risk_weight=w, turn_penalty=20.0, drone_radius=collision_radius)
 
         if path_local:
@@ -280,15 +285,10 @@ def run_online_simulation(
 
         click_x, click_y = int(event.xdata), int(event.ydata)
         print(f"\n Kliknięcie w: ({click_x}, {click_y})")
-
-        # 1. Dodajemy przeszkodę
         OBSTACLE_RADIUS = 8
         env.add_dynamic_risk_zone(click_x, click_y, radius=OBSTACLE_RADIUS)
         img.set_data(env.grid.T)
 
-        # ---------------------------------------------------------
-        # NOWA LOGIKA WYKRYWANIA (Matematyka: 14 metrów)
-        # ---------------------------------------------------------
         DRONE_RADIUS = collision_radius - 2 # Promień drona
         SENSOR_RANGE = 5.0  # Zasięg czujnika
 
@@ -352,9 +352,12 @@ def run_online_simulation(
             goal_marker.set_facecolor('gray')
             line_new.set_label('Powrót (Awaryjny)')
 
-        update_route(risk_slider.val)
+            risk_slider.set_val(50.0)
 
-        print("\n--- GENEROWANIE TABELI ANALIZY (W KONSOLI) ---")
+        if sim_state["mode"] == "NORMAL":
+            update_route(risk_slider.val)
+
+        print("\nGENEROWANIE TABELI ANALIZY")
         path_remainder = path_global[drone_idx:]
         base_risk = calculate_segment_risk(path_remainder, env)
         base_len = calculate_path_length(path_remainder)
@@ -372,3 +375,123 @@ def run_online_simulation(
 
     cid = fig.canvas.mpl_connect('button_press_event', onclick)
     plt.show(block=True)
+
+
+def generate_thesis_charts(
+        env: GridMap,
+        start: Tuple[int, int],
+        goal: Tuple[int, int],
+        search_func: Callable,
+        collision_radius: float
+) -> None:
+    print("\n--- GENEROWANIE WYKRESÓW DO PRACY DYPLOMOWEJ ---")
+
+    # 1. Tworzenie katalogu na wyniki
+    output_dir = "research_results"
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+        print(f"Utworzono katalog: {output_dir}")
+
+    print("Zbieranie danych dla wag W od 0 do 100...")
+
+    weights = range(0, 105, 5)
+    data_w = []
+    data_len = []
+    data_risk = []
+    data_time = []
+    data_nodes = []
+
+    # 2. Zbieranie danych
+    for w in weights:
+        path, stats = search_func(env, start, goal, risk_weight=float(w), turn_penalty=20.0,
+                                  drone_radius=collision_radius)
+
+        if stats['found']:
+            data_w.append(w)
+            data_len.append(stats['length'])
+            data_risk.append(stats['risk'])
+            data_time.append(stats['time'] * 1000)  # ms
+            data_nodes.append(stats['nodes'])
+        else:
+            print(f"Ostrzeżenie: Dla W={w} nie znaleziono trasy.")
+
+    # Ustawiamy styl na domyślny (białe tło, dobre do druku)
+    plt.style.use('default')
+
+    # --- WYKRES 1: KOMPROMIS (Pareto) ---
+    fig1, ax1 = plt.subplots(figsize=(10, 6))
+    scatter = ax1.scatter(data_len, data_risk, c=data_w, cmap='viridis', s=100, zorder=2, edgecolor='black')
+    ax1.plot(data_len, data_risk, color='gray', linestyle='--', alpha=0.5, zorder=1)
+
+    ax1.set_title("Optymalizacja Wielokryterialna: Ryzyko vs Dystans", fontsize=14, pad=15)
+    ax1.set_xlabel("Długość Trasy [m]", fontsize=12)
+    ax1.set_ylabel("Całkowity Koszt Ryzyka (bezjednostkowy)", fontsize=12)
+    ax1.grid(True, linestyle='--', alpha=0.7)
+
+    cbar = plt.colorbar(scatter, ax=ax1)
+    cbar.set_label('Waga Ryzyka (W)', rotation=270, labelpad=15)
+
+    for i, w in enumerate(data_w):
+        if w in [0, 20, 50, 100]:
+            ax1.annotate(f"W={w}", (data_len[i], data_risk[i]), xytext=(5, 5), textcoords='offset points', fontsize=9,
+                         fontweight='bold')
+
+    plt.tight_layout()
+    # ZAPIS
+    filename1 = os.path.join(output_dir, "1_pareto_tradeoff.png")
+    plt.savefig(filename1, dpi=300, bbox_inches='tight')
+    print(f"Zapisano: {filename1}")
+    plt.close(fig1)  # Zamykamy, żeby nie wisiało w pamięci
+
+    # --- WYKRES 2: ANALIZA WRAŻLIWOŚCI ---
+    fig2, ax2 = plt.subplots(figsize=(10, 6))
+
+    color_len = 'tab:blue'
+    ax2.set_xlabel('Współczynnik Wagi Ryzyka (W)', fontsize=12)
+    ax2.set_ylabel('Długość Trasy [m]', color=color_len, fontsize=12)
+    ax2.plot(data_w, data_len, color=color_len, marker='o', linewidth=2, label='Długość')
+    ax2.tick_params(axis='y', labelcolor=color_len)
+    ax2.grid(True, linestyle='--', alpha=0.5)
+
+    ax2_twin = ax2.twinx()
+    color_risk = 'tab:red'
+    ax2_twin.set_ylabel('Całkowite Ryzyko', color=color_risk, fontsize=12)
+    ax2_twin.plot(data_w, data_risk, color=color_risk, marker='s', linewidth=2, linestyle='--', label='Ryzyko')
+    ax2_twin.tick_params(axis='y', labelcolor=color_risk)
+
+    plt.title("Wpływ Wagi (W) na parametry trasy", fontsize=14, pad=15)
+    fig2.legend(loc="upper center", bbox_to_anchor=(0.5, 0.9), ncol=2)
+
+    plt.tight_layout()
+    # ZAPIS
+    filename2 = os.path.join(output_dir, "2_sensitivity_analysis.png")
+    plt.savefig(filename2, dpi=300, bbox_inches='tight')
+    print(f"Zapisano: {filename2}")
+    plt.close(fig2)
+
+    # --- WYKRES 3: KOSZT OBLICZENIOWY ---
+    fig3, (ax3a, ax3b) = plt.subplots(1, 2, figsize=(12, 5))
+
+    # Czas
+    ax3a.bar(data_w, data_time, width=3, color='purple', alpha=0.7)
+    ax3a.set_title("Czas Obliczeń", fontsize=12)
+    ax3a.set_xlabel("Waga Ryzyka (W)")
+    ax3a.set_ylabel("Czas [ms]")
+    ax3a.grid(axis='y', linestyle='--', alpha=0.5)
+
+    # Węzły
+    ax3b.plot(data_w, data_nodes, marker='o', color='green')
+    ax3b.set_title("Złożoność (Odwiedzone Węzły)", fontsize=12)
+    ax3b.set_xlabel("Waga Ryzyka (W)")
+    ax3b.set_ylabel("Liczba Węzłów")
+    ax3b.grid(True, linestyle='--', alpha=0.5)
+
+    plt.suptitle("Analiza Wydajności Algorytmu", fontsize=14)
+    plt.tight_layout()
+    # ZAPIS
+    filename3 = os.path.join(output_dir, "3_performance_metrics.png")
+    plt.savefig(filename3, dpi=300, bbox_inches='tight')
+    print(f"Zapisano: {filename3}")
+    plt.close(fig3)
+
+    print("\nGotowe! Wszystkie wykresy zapisano w folderze 'research_results'.")

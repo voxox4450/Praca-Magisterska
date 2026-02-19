@@ -5,6 +5,7 @@ from algorithms.a_star_risk import run_risk_astar
 from visualization.plotter import plot_simulation, plot_interactive_risk, run_online_simulation
 from algorithms.common import generate_analysis_table
 from typing import Tuple, List, Dict, Any
+from visualization.plotter import generate_thesis_charts # Pamiętaj o imporcie!
 
 
 def main() -> None:
@@ -91,6 +92,7 @@ def run_offline_mode(size: int, collision_radius: float, start_pos: Tuple[int, i
         collision_radius=collision_radius,
         table_title="ANALIZA TRYBU OFFLINE"
     )
+    generate_thesis_charts(env, start_pos, goal_pos, run_risk_astar, collision_radius)
 
     print("\n Wizualizacja Djikstra, A* Standard oraz interaktywna mapa ryzyka dla Risk A*")
 

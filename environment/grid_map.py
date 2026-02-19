@@ -30,10 +30,6 @@ class GridMap:
         current_pixels = 0
         attempts = 0
 
-        # Pozycje Startu i Celu (muszą być zgrane z main.py)
-        #start_pos = (5, 5)
-        #goal_pos = (95, 95)
-
         # Wymagany odstęp: 3 metry wymogu + 1 metr zapasu = 4.0
         SAFE_MARGIN = 4.0
 
