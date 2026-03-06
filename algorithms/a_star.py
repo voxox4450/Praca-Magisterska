@@ -3,7 +3,7 @@ import time
 import math
 from typing import List, Tuple, Dict, Any
 from environment.grid_map import GridMap
-from algorithms.common import Node, reconstruct_path
+from algorithms.common import Node, reconstruct_path, calculate_kinematic_flight_time
 
 
 def run_astar(
@@ -14,7 +14,7 @@ def run_astar(
 ) -> Tuple[List[Tuple[int, int]], Dict[str, Any]]:
     t0 = time.time()
 
-    start_node = Node(start[0], start[1], 0.0)
+    start_node = Node(start[0], start[1], 0.0, direction=(0, 0))
     open_list = []
     heapq.heappush(open_list, start_node)
 
@@ -29,9 +29,14 @@ def run_astar(
         if (current.x, current.y) == goal:
             execution_time = time.time() - t0
             path, length, total_risk, turns = reconstruct_path(current, grid_map)
+
+            # --- OBLICZANIE FIZYCZNEGO CZASU LOTU ---
+            flight_time = calculate_kinematic_flight_time(path, mass=30.0, max_thrust_net=120.0, v_max_kmh=65.0)
+
             return path, {
                 "found": True, "time": execution_time, "length": length,
-                "risk": total_risk, "turns": turns, "nodes": nodes_expanded
+                "risk": total_risk, "turns": turns, "nodes": nodes_expanded,
+                "flight_time": flight_time  # <--- NOWA DANA
             }
 
         if (current.x, current.y) in visited:
@@ -41,17 +46,27 @@ def run_astar(
         for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]:
             nx, ny = current.x + dx, current.y + dy
 
-            # ZMIANA: Kolizja z uwzględnieniem wymiarów
             if grid_map.is_collision(nx, ny, drone_radius=collision_radius):
                 continue
 
             dist_cost = math.sqrt(dx ** 2 + dy ** 2)
-            new_g = current.cost + dist_cost
+
+            # --- ZMIANA: TIE-BREAKER KIERUNKOWY ---
+            turn_cost = 0.0
+            if current.parent is not None:
+                if current.direction != (dx, dy):
+                    turn_cost = 0.001
+
+            new_g = current.cost + dist_cost + turn_cost
 
             if (nx, ny) not in g_score or new_g < g_score[(nx, ny)]:
                 g_score[(nx, ny)] = new_g
-                h = math.sqrt((nx - goal[0]) ** 2 + (ny - goal[1]) ** 2)
-                neighbor = Node(nx, ny, new_g, current, heuristic=h)
+
+                # --- ZMIANA: TIE-BREAKER HEURYSTYCZNY ---
+                # Delikatne wzmocnienie heurystyki promuje rozwijanie węzłów leżących dokładnie w stronę celu
+                h = math.sqrt((nx - goal[0]) ** 2 + (ny - goal[1]) ** 2) * 1.001
+
+                neighbor = Node(nx, ny, new_g, current, direction=(dx, dy), heuristic=h)
                 heapq.heappush(open_list, neighbor)
 
     return [], {"found": False, "time": 0, "length": 0, "risk": 0, "turns": 0, "nodes": nodes_expanded}

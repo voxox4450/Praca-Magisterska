@@ -104,7 +104,8 @@ def plot_simulation(
     turns_count = stats.get('turns', 0)
 
     title_text = (f"{algo_name}\n"
-                  f"Dystans: {stats['length']:.1f} m | Ryzyko: {stats['risk']:.1f} | Czas: {stats['time']:.4f} s | Zakręty: {turns_count}")
+                  f"Dystans: {stats['length']:.1f} m | Czas Lotu: {stats.get('flight_time', 0):.1f} s | "
+                  f"Ryzyko: {stats['risk']:.1f} | Zakręty: {turns_count}")
     ax.set_title(title_text, fontsize=14, pad=15)
 
     plt.show(block=block)
@@ -169,8 +170,8 @@ def plot_interactive_risk(
             line_smooth.set_data(sx, sy)
             turns_count = stats.get('turns', 0)
             title_text = (f"A* Risk-Aware (W={w:.0f})\n"
-                          f"Dyst: {stats['length']:.1f} m | Ryzyko: {stats['risk']:.1f} | "
-                          f"Czas: {stats['time']:.4f} s | Zakręty: {turns_count}")
+                          f"Dyst: {stats['length']:.1f} m | Czas Lotu: {stats.get('flight_time', 0):.1f} s | "
+                          f"Ryzyko: {stats['risk']:.1f} | Zakręty: {turns_count}")
             ax.set_title(title_text, fontsize=14, pad=15)
         else:
             line_raw.set_data([], [])
@@ -191,9 +192,9 @@ def run_online_simulation(
         search_func: Callable,
         collision_radius: float
 ) -> None:
-
     # Trasa Startowa (W=20)
-    path_global, stats_global = search_func(env, start, goal, risk_weight=20.0, turn_penalty=20.0, drone_radius=collision_radius)
+    path_global, stats_global = search_func(env, start, goal, risk_weight=20.0, turn_penalty=20.0,
+                                            drone_radius=collision_radius)
 
     if not path_global:
         print("Błąd: Nie znaleziono trasy startowej.")
@@ -205,8 +206,6 @@ def run_online_simulation(
 
     # Mapa
     img = ax.imshow(env.grid.T, origin='lower', cmap=get_city_cmap(), vmin=0, vmax=1)
-
-    # Colorbar
     cbar = fig.colorbar(img, ax=ax, location='right', fraction=0.048, pad=0.045, shrink=0.72, anchor=(0.0, 1.0))
     cbar.set_ticks([0, 0.5, 1])
     cbar.set_ticklabels(['Bezpiecznie', 'Ryzyko', 'BUDYNEK'])
@@ -214,9 +213,11 @@ def run_online_simulation(
     cbar.set_label('Poziom Ryzyka', color='white', labelpad=10)
 
     turns = stats_global.get('turns', 0)
+
+    # --- POPRAWKA TYTUŁU: CZAS LOTU ZAMIAST CZASU OBLICZEŃ ---
     initial_title = (f"A* Risk-Aware (W=20) planowana trasa przelotu\n"
-                     f"Dyst: {stats_global['length']:.1f} m | Ryzyko: {stats_global['risk']:.1f} | "
-                     f"Czas: {stats_global['time']:.4f} s | Zakręty: {turns}")
+                     f"Dyst: {stats_global['length']:.1f} m | Czas Lotu: {stats_global.get('flight_time', 0):.1f} s | "
+                     f"Ryzyko: {stats_global['risk']:.1f} | Zakręty: {turns}")
 
     ax.set_title(initial_title, fontsize=14, color='white', pad=15)
 
@@ -226,14 +227,19 @@ def run_online_simulation(
     line_global, = ax.plot(gx_smooth, gy_smooth, color='black', linestyle='--', linewidth=2.5, alpha=0.8,
                            label='Pierwotny Plan')
     line_flown, = ax.plot([], [], color='lime', linewidth=3, label='Droga Przebyta', zorder=3)
+
+    # NOWOŚĆ: Linia pokazująca drogę przebytą w czasie reakcji (bezwładność)
+    line_reaction, = ax.plot([], [], color='orange', linestyle=':', linewidth=4, label='Czas Reakcji (Bezwładność)',
+                             zorder=4)
+
     line_new, = ax.plot([], [], color='cyan', linewidth=3, label='Replanowana Trasa',
                         path_effects=[pe.withStroke(linewidth=5, foreground="blue")], zorder=4)
 
     ax.scatter([start[0]], [start[1]], color='lime', s=150, label='Start', edgecolors='black', zorder=5)
     goal_marker = ax.scatter([goal[0]], [goal[1]], color='magenta', marker='X', s=150, label='Cel', edgecolors='black',
                              zorder=5)
-    drone_marker, = ax.plot([], [], 'o', color='yellow', markersize=12, label='Wykrycie (5m)', markeredgecolor='black',
-                            zorder=6)
+    drone_marker, = ax.plot([], [], 'o', color='yellow', markersize=12, label='Wykrycie (Zasięg)',
+                            markeredgecolor='black', zorder=6)
 
     # Legenda
     legend = ax.legend(loc='lower left', bbox_to_anchor=(1.04, -0.01), facecolor='#333333', edgecolor='white',
@@ -254,18 +260,26 @@ def run_online_simulation(
         if not sim_state["clicked"] or sim_state["mode"] in ["CRASH", "IGNORE", "IDLE"]: return
 
         if sim_state["mode"] == "RTH":
-            w = 50.0  # Sztywna wysoka waga ryzyka dla trybu powrotu
+            w = 50.0
         else:
-            w = risk_slider.val # Dynamiczna waga ryzyka dla trybu omijania przeszkody
-        path_local, stats = search_func(env, sim_state["drone_pos"], sim_state["target_pos"], risk_weight=w, turn_penalty=20.0, drone_radius=collision_radius)
+            w = risk_slider.val
+
+        path_local, stats = search_func(env, sim_state["drone_pos"], sim_state["target_pos"], risk_weight=w,
+                                        turn_penalty=20.0,
+                                        drone_radius=collision_radius,
+                                        initial_direction=sim_state.get("heading", (0, 0)),
+                                        current_speed=sim_state.get("drone_speed", 0.0))
 
         if path_local:
             nx, ny = smooth_path_bspline(path_local)
             line_new.set_data(nx, ny)
 
             turns_count = stats.get('turns', 0)
-            stats_text = (f"Dyst: {stats['length']:.1f}m | Ryzyko: {stats['risk']:.1f} | "
-                          f"Czas: {stats['time']:.4f}s | Zakręty: {turns_count}")
+
+            # --- POPRAWKA TYTUŁU: CZAS LOTU ZAMIAST CZASU OBLICZEŃ ---
+            stats_text = (f"Dyst: {stats['length']:.1f}m | Czas Lotu: {stats.get('flight_time', 0):.1f} s | "
+                          f"Ryzyko: {stats['risk']:.1f} | Zakręty: {turns_count}")
+
             if sim_state["mode"] == "RTH":
                 ax.set_title(f"Tryb Powrotu | W={w:.0f}\n{stats_text}", color='orange', fontsize=14, pad=15)
                 line_new.set_color('orange')
@@ -284,81 +298,160 @@ def run_online_simulation(
         if sim_state["clicked"]: return
 
         click_x, click_y = int(event.xdata), int(event.ydata)
-        print(f"\n Kliknięcie w: ({click_x}, {click_y})")
         OBSTACLE_RADIUS = 8
         env.add_dynamic_risk_zone(click_x, click_y, radius=OBSTACLE_RADIUS)
         img.set_data(env.grid.T)
 
-        DRONE_RADIUS = collision_radius - 2 # Promień drona
-        SENSOR_RANGE = 5.0  # Zasięg czujnika
+        # --- PARAMETRY ŚRODOWISKA ---
+        DRONE_RADIUS = collision_radius - 2  # <--- Tutaj była zguba!
+        SENSOR_RANGE = 50.0
+        CRASH_DIST = OBSTACLE_RADIUS + collision_radius
 
-        # Dystans graniczny = Promień Przeszkody + Promień Drona + Zasięg Czujnika
-        # = 8 + 1 + 5 = 14.0
-        LIMIT_DIST = OBSTACLE_RADIUS + DRONE_RADIUS + SENSOR_RANGE
-
-        collision_idx = 0
-        for i, (px, py) in enumerate(path_global):
+        # --- ETAP 1: Czy przeszkoda w ogóle przecina naszą zaplanowaną trasę? ---
+        is_path_blocked = False
+        for (px, py) in path_global:
             dist_to_center = np.sqrt((px - click_x) ** 2 + (py - click_y) ** 2)
-            if dist_to_center <= LIMIT_DIST:
-                collision_idx = i
+            if dist_to_center <= CRASH_DIST:
+                is_path_blocked = True
                 break
 
-        if collision_idx == -1:
-            print("Zagrożenie daleko.")
-            ax.set_title("Zagrożenie poza zasięgiem (>5m).", color='lime', fontsize=14)
+        if not is_path_blocked:
+            print("\n-> Radar wykrył obiekt, ale nie leży on na kursie kolizyjnym. Dron ignoruje zagrożenie.")
+            ax.set_title("Zagrożenie poza kursem lotu. Brak reakcji.", color='lime', fontsize=14, pad=15)
             line_flown.set_data(gx_smooth, gy_smooth)
             sim_state["clicked"] = True
             sim_state["mode"] = "IGNORE"
             fig.canvas.draw()
             return
 
-        drone_idx = collision_idx
-        current_drone_pos = path_global[drone_idx]
+        # --- ETAP 2: Szukamy momentu, w którym radar zasygnalizuje problem (60m). ---
+        collision_idx = -1
+        for i, (px, py) in enumerate(path_global):
+            dist_to_center = np.sqrt((px - click_x) ** 2 + (py - click_y) ** 2)
+            if dist_to_center <= SENSOR_RANGE:
+                collision_idx = i
+                break
 
-        # Rysujemy przebytą
-        flown_raw = path_global[:drone_idx + 1]
-        if len(flown_raw) > 2:
-            fx, fy = smooth_path_bspline(flown_raw)
+        if collision_idx == -1:
+            return
+
+            # --- DYNAMICZNY MODEL KINEMATYCZNY CHWILOWEJ PRĘDKOŚCI I HAMOWANIA ---
+        processing_delay = 0.8
+        v_max = 18.0
+        acceleration = 4.0
+
+        path_to_current = path_global[:collision_idx + 1]
+        dist_from_start = calculate_path_length(path_to_current)
+        v_accel = np.sqrt(2 * acceleration * dist_from_start) if dist_from_start > 0 else 0.0
+
+        dist_to_next_turn = 0.0
+        v_turn = v_max
+
+        if collision_idx < len(path_global) - 2:
+            current_dir = (path_global[collision_idx + 1][0] - path_global[collision_idx][0],
+                           path_global[collision_idx + 1][1] - path_global[collision_idx][1])
+            temp_dist = 0.0
+            for i in range(collision_idx + 1, len(path_global) - 1):
+                dx = path_global[i + 1][0] - path_global[i][0]
+                dy = path_global[i + 1][1] - path_global[i][1]
+                next_dir = (dx, dy)
+                temp_dist += np.sqrt(
+                    (path_global[i][0] - path_global[i - 1][0]) ** 2 + (path_global[i][1] - path_global[i - 1][1]) ** 2)
+
+                if current_dir != next_dir:
+                    dist_to_next_turn = temp_dist
+                    dot = current_dir[0] * next_dir[0] + current_dir[1] * next_dir[1]
+                    mag1 = np.sqrt(current_dir[0] ** 2 + current_dir[1] ** 2)
+                    mag2 = np.sqrt(next_dir[0] ** 2 + next_dir[1] ** 2)
+                    if mag1 * mag2 > 0:
+                        cos_theta = max(-1.0, min(1.0, dot / (mag1 * mag2)))
+                        angle = np.arccos(cos_theta)
+                        v_turn = max(1.0, v_max * (1.0 - (angle / np.pi)))
+                    break
+
+        v_brake = np.sqrt(v_turn ** 2 + 2 * acceleration * dist_to_next_turn) if dist_to_next_turn > 0 else v_max
+
+        v_detect = min(v_max, v_accel, v_brake)
+        print(f"\n-> WYKRYTO ZAGROŻENIE! Prędkość początkowa: {v_detect:.1f} m/s")
+
+        # Obliczenia hamowania w czasie zwłoki układu nawigacji
+        t_stop = v_detect / acceleration
+        t_react = min(processing_delay, t_stop)
+
+        reaction_distance_meters = (v_detect * t_react) - (0.5 * acceleration * (t_react ** 2))
+        reaction_indices = int(np.ceil(reaction_distance_meters))
+
+        v_react_end = max(0.0, v_detect - acceleration * processing_delay)
+        print(
+            f"-> Po czasie reakcji ({processing_delay}s) dron przeleciał {reaction_distance_meters:.1f}m i zwolnił do: {v_react_end:.1f} m/s")
+
+        drone_detect_idx = collision_idx
+        drone_react_idx = min(drone_detect_idx + reaction_indices, len(path_global) - 1)
+        reaction_path = path_global[drone_detect_idx:drone_react_idx + 1]
+
+        # Wektor uderzeniowy (pęd) do algorytmu
+        if len(reaction_path) >= 2:
+            last_dx = reaction_path[-1][0] - reaction_path[-2][0]
+            last_dy = reaction_path[-1][1] - reaction_path[-2][1]
+            flight_heading = (int(np.sign(last_dx)), int(np.sign(last_dy)))
         else:
-            fx = [p[0] for p in flown_raw]
-            fy = [p[1] for p in flown_raw]
-        line_flown.set_data(fx, fy)
-        drone_marker.set_data([current_drone_pos[0]], [current_drone_pos[1]])
+            flight_heading = (0, 0)
 
-        # Jeśli środek drona jest bliżej niż (Promień przeszkody + Promień drona)
-        dist_to_drone = np.sqrt((click_x - current_drone_pos[0]) ** 2 + (click_y - current_drone_pos[1]) ** 2)
-        if dist_to_drone <= (OBSTACLE_RADIUS + DRONE_RADIUS):
-            ax.set_title("Dron nie wystartował!", color='red', fontsize=14)
+        flown_raw = path_global[:drone_detect_idx + 1]
+        fx, fy = smooth_path_bspline(flown_raw) if len(flown_raw) > 2 else ([p[0] for p in flown_raw],
+                                                                            [p[1] for p in flown_raw])
+        line_flown.set_data(fx, fy)
+
+        rx, ry = smooth_path_bspline(reaction_path) if len(reaction_path) > 2 else ([p[0] for p in reaction_path],
+                                                                                    [p[1] for p in reaction_path])
+        line_reaction.set_data(rx, ry)
+
+        drone_marker.set_data([path_global[drone_detect_idx][0]], [path_global[drone_detect_idx][1]])
+
+        # WERYFIKACJA KATASTROFY PRZY ZBYT DUŻEJ PRĘDKOŚCI
+        crash = False
+        for (px, py) in reaction_path:
+            dist_to_drone = np.sqrt((click_x - px) ** 2 + (click_y - py) ** 2)
+            if dist_to_drone <= (OBSTACLE_RADIUS + DRONE_RADIUS):
+                crash = True
+                break
+
+        if crash:
+            ax.set_title("KATASTROFA! Zbyt późna reakcja przy dużej prędkości!", color='red', fontsize=15,
+                         fontweight='bold')
             sim_state["clicked"] = True
             sim_state["mode"] = "CRASH"
             fig.canvas.draw()
             return
 
-        # DECYZJA
-        path_check, _ = search_func(env, current_drone_pos, goal, risk_weight=20.0, turn_penalty=20.0, drone_radius=collision_radius)
+        current_drone_pos = path_global[drone_react_idx]
 
         sim_state["drone_pos"] = current_drone_pos
         sim_state["clicked"] = True
+        sim_state["heading"] = flight_heading
+        sim_state["drone_speed"] = v_react_end
+
+        # --- DECYZJA O NOWEJ TRASIE Z UŻYCIEM PĘDU FIZYCZNEGO ---
+        path_check, _ = search_func(env, current_drone_pos, goal, risk_weight=20.0, turn_penalty=20.0,
+                                    drone_radius=collision_radius,
+                                    initial_direction=flight_heading,
+                                    current_speed=v_react_end)
 
         if path_check:
-            print("Cel osiągalny.")
             sim_state["target_pos"] = goal
             sim_state["mode"] = "NORMAL"
             line_new.set_label('Replanowana Trasa')
         else:
-            print("Cel zablokowany")
             sim_state["target_pos"] = start
             sim_state["mode"] = "RTH"
             goal_marker.set_facecolor('gray')
             line_new.set_label('Powrót (Awaryjny)')
-
             risk_slider.set_val(50.0)
 
         if sim_state["mode"] == "NORMAL":
             update_route(risk_slider.val)
 
-        print("\nGENEROWANIE TABELI ANALIZY")
-        path_remainder = path_global[drone_idx:]
+        path_remainder = path_global[drone_react_idx:]
         base_risk = calculate_segment_risk(path_remainder, env)
         base_len = calculate_path_length(path_remainder)
 
@@ -370,7 +463,7 @@ def run_online_simulation(
             base_len=base_len,
             base_risk=base_risk,
             collision_radius=collision_radius,
-            table_title="ANALIZA TRYBU ONLINE (H3)"
+            table_title="ANALIZA TRYBU ONLINE (H4)"
         )
 
     cid = fig.canvas.mpl_connect('button_press_event', onclick)
@@ -378,120 +471,147 @@ def run_online_simulation(
 
 
 def generate_thesis_charts(
-        env: GridMap,
+        envs: List[GridMap],  # <--- ZMIANA: Przyjmujemy LISTĘ map!
         start: Tuple[int, int],
         goal: Tuple[int, int],
         search_func: Callable,
-        collision_radius: float
+        collision_radius: float,
+        stats_d: Dict[str, Any] = None,
+        stats_a: Dict[str, Any] = None,
+        density_label: str = ""
 ) -> None:
     print("\n--- GENEROWANIE WYKRESÓW DO PRACY DYPLOMOWEJ ---")
 
-    # 1. Tworzenie katalogu na wyniki
     output_dir = "research_results"
+    if density_label:
+        output_dir = os.path.join(output_dir, f"gestosc_{density_label}")
+
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
         print(f"Utworzono katalog: {output_dir}")
 
-    print("Zbieranie danych dla wag W od 0 do 100...")
+    print(f"Zbieranie danych dla wag W od 0 do 100 (Przetwarzanie {len(envs)} map)...")
 
     weights = range(0, 105, 5)
-    data_w = []
-    data_len = []
-    data_risk = []
-    data_time = []
-    data_nodes = []
+    data_w, data_len, data_risk, data_time, data_nodes = [], [], [], [], []
+    data_flight_time, data_turns = [], []
 
-    # 2. Zbieranie danych
+    # --- ZMIANA: Pętla uśredniająca wyniki z wielu map (Monte Carlo) ---
     for w in weights:
-        path, stats = search_func(env, start, goal, risk_weight=float(w), turn_penalty=20.0,
-                                  drone_radius=collision_radius)
+        w_len, w_risk, w_time, w_nodes, w_flight, w_turns = 0, 0, 0, 0, 0, 0
+        found_count = 0
 
-        if stats['found']:
+        for env in envs:
+            path, stats = search_func(env, start, goal, risk_weight=float(w), turn_penalty=20.0,
+                                      drone_radius=collision_radius)
+            if stats['found']:
+                w_len += stats['length']
+                w_risk += stats['risk']
+                w_time += stats['time'] * 1000
+                w_nodes += stats['nodes']
+                w_flight += stats.get('flight_time', 0.0)
+                w_turns += stats.get('turns', 0)
+                found_count += 1
+
+        if found_count > 0:
             data_w.append(w)
-            data_len.append(stats['length'])
-            data_risk.append(stats['risk'])
-            data_time.append(stats['time'] * 1000)  # ms
-            data_nodes.append(stats['nodes'])
+            data_len.append(w_len / found_count)
+            data_risk.append(w_risk / found_count)
+            data_time.append(w_time / found_count)
+            data_nodes.append(w_nodes / found_count)
+            data_flight_time.append(w_flight / found_count)
+            data_turns.append(w_turns / found_count)
         else:
-            print(f"Ostrzeżenie: Dla W={w} nie znaleziono trasy.")
+            print(f"Ostrzeżenie: Dla W={w} nie znaleziono trasy na żadnej z próbkowanych map.")
 
-    # Ustawiamy styl na domyślny (białe tło, dobre do druku)
     plt.style.use('default')
 
     # --- WYKRES 1: KOMPROMIS (Pareto) ---
     fig1, ax1 = plt.subplots(figsize=(10, 6))
     scatter = ax1.scatter(data_len, data_risk, c=data_w, cmap='viridis', s=100, zorder=2, edgecolor='black')
     ax1.plot(data_len, data_risk, color='gray', linestyle='--', alpha=0.5, zorder=1)
-
     ax1.set_title("Optymalizacja Wielokryterialna: Ryzyko vs Dystans", fontsize=14, pad=15)
     ax1.set_xlabel("Długość Trasy [m]", fontsize=12)
     ax1.set_ylabel("Całkowity Koszt Ryzyka (bezjednostkowy)", fontsize=12)
     ax1.grid(True, linestyle='--', alpha=0.7)
-
     cbar = plt.colorbar(scatter, ax=ax1)
     cbar.set_label('Waga Ryzyka (W)', rotation=270, labelpad=15)
-
-    for i, w in enumerate(data_w):
-        if w in [0, 20, 50, 100]:
-            ax1.annotate(f"W={w}", (data_len[i], data_risk[i]), xytext=(5, 5), textcoords='offset points', fontsize=9,
-                         fontweight='bold')
-
     plt.tight_layout()
-    # ZAPIS
-    filename1 = os.path.join(output_dir, "1_pareto_tradeoff.png")
-    plt.savefig(filename1, dpi=300, bbox_inches='tight')
-    print(f"Zapisano: {filename1}")
-    plt.close(fig1)  # Zamykamy, żeby nie wisiało w pamięci
+    plt.savefig(os.path.join(output_dir, "1_pareto_tradeoff.png"), dpi=300, bbox_inches='tight')
+    plt.close(fig1)
 
-    # --- WYKRES 2: ANALIZA WRAŻLIWOŚCI ---
-    fig2, ax2 = plt.subplots(figsize=(10, 6))
+    # --- WYKRES 2: KOSZT OBLICZENIOWY ---
+    fig2, (ax2a, ax2b) = plt.subplots(1, 2, figsize=(12, 5))
+    ax2a.bar(data_w, data_time, width=3, color='purple', alpha=0.7)
+    ax2a.set_title("Czas Obliczeń", fontsize=12)
+    ax2a.set_xlabel("Waga Ryzyka (W)")
+    ax2a.set_ylabel("Czas [ms]")
+    ax2a.grid(axis='y', linestyle='--', alpha=0.5)
 
-    color_len = 'tab:blue'
-    ax2.set_xlabel('Współczynnik Wagi Ryzyka (W)', fontsize=12)
-    ax2.set_ylabel('Długość Trasy [m]', color=color_len, fontsize=12)
-    ax2.plot(data_w, data_len, color=color_len, marker='o', linewidth=2, label='Długość')
-    ax2.tick_params(axis='y', labelcolor=color_len)
-    ax2.grid(True, linestyle='--', alpha=0.5)
-
-    ax2_twin = ax2.twinx()
-    color_risk = 'tab:red'
-    ax2_twin.set_ylabel('Całkowite Ryzyko', color=color_risk, fontsize=12)
-    ax2_twin.plot(data_w, data_risk, color=color_risk, marker='s', linewidth=2, linestyle='--', label='Ryzyko')
-    ax2_twin.tick_params(axis='y', labelcolor=color_risk)
-
-    plt.title("Wpływ Wagi (W) na parametry trasy", fontsize=14, pad=15)
-    fig2.legend(loc="upper center", bbox_to_anchor=(0.5, 0.9), ncol=2)
-
-    plt.tight_layout()
-    # ZAPIS
-    filename2 = os.path.join(output_dir, "2_sensitivity_analysis.png")
-    plt.savefig(filename2, dpi=300, bbox_inches='tight')
-    print(f"Zapisano: {filename2}")
-    plt.close(fig2)
-
-    # --- WYKRES 3: KOSZT OBLICZENIOWY ---
-    fig3, (ax3a, ax3b) = plt.subplots(1, 2, figsize=(12, 5))
-
-    # Czas
-    ax3a.bar(data_w, data_time, width=3, color='purple', alpha=0.7)
-    ax3a.set_title("Czas Obliczeń", fontsize=12)
-    ax3a.set_xlabel("Waga Ryzyka (W)")
-    ax3a.set_ylabel("Czas [ms]")
-    ax3a.grid(axis='y', linestyle='--', alpha=0.5)
-
-    # Węzły
-    ax3b.plot(data_w, data_nodes, marker='o', color='green')
-    ax3b.set_title("Złożoność (Odwiedzone Węzły)", fontsize=12)
-    ax3b.set_xlabel("Waga Ryzyka (W)")
-    ax3b.set_ylabel("Liczba Węzłów")
-    ax3b.grid(True, linestyle='--', alpha=0.5)
+    ax2b.plot(data_w, data_nodes, marker='o', color='green')
+    ax2b.set_title("Złożoność (Odwiedzone Węzły)", fontsize=12)
+    ax2b.set_xlabel("Waga Ryzyka (W)")
+    ax2b.set_ylabel("Liczba Węzłów")
+    ax2b.grid(True, linestyle='--', alpha=0.5)
 
     plt.suptitle("Analiza Wydajności Algorytmu", fontsize=14)
     plt.tight_layout()
-    # ZAPIS
-    filename3 = os.path.join(output_dir, "3_performance_metrics.png")
-    plt.savefig(filename3, dpi=300, bbox_inches='tight')
-    print(f"Zapisano: {filename3}")
-    plt.close(fig3)
+    plt.savefig(os.path.join(output_dir, "2_performance_metrics.png"), dpi=300, bbox_inches='tight')
+    plt.close(fig2)
+
+    # =========================================================================
+    # --- WYKRES 3: GŁÓWNY WYKRES PORÓWNAWCZY (BENCHMARK) DLA PROFESORA ---
+    # =========================================================================
+    if stats_d and stats_a and 20 in data_w:
+        idx_20 = data_w.index(20)  # Bierzemy do porównania W=20 (zbilansowane ryzyko)
+
+        labels = ['Dijkstra\n(Matematyczna)', 'A* Standard\n(Szybka)', 'Risk-Aware A*\n(Kinematyczna)']
+        colors = ['#888888', '#33bbee', '#33ee33']
+
+        # Pobranie danych dla wszystkich algorytmów
+        dist_vals = [stats_d.get('length', 0), stats_a.get('length', 0), data_len[idx_20]]
+        risk_vals = [stats_d.get('risk', 0), stats_a.get('risk', 0), data_risk[idx_20]]
+        time_vals = [stats_d.get('flight_time', 0), stats_a.get('flight_time', 0), data_flight_time[idx_20]]
+        turns_vals = [stats_d.get('turns', 0), stats_a.get('turns', 0), data_turns[idx_20]]
+
+        fig3, axs = plt.subplots(2, 2, figsize=(14, 10))
+        fig3.suptitle("Benchmarking Algorytmów Planowania Lotu (DJI FlyCart 30)", fontsize=18, fontweight='bold')
+
+        # 1. Dystans (Dijkstra wygrywa)
+        axs[0, 0].bar(labels, dist_vals, color=colors, edgecolor='black', alpha=0.9)
+        axs[0, 0].set_title("1. Długość Trasy (Geometryczna) [m]", fontsize=13)
+        axs[0, 0].set_ylabel("Metry")
+        axs[0, 0].grid(axis='y', linestyle='--', alpha=0.5)
+
+        # 2. Ryzyko (Twój algorytm deklasuje resztę)
+        axs[0, 1].bar(labels, risk_vals, color=colors, edgecolor='black', alpha=0.9)
+        axs[0, 1].set_title("2. Poziom Ekspozycji na Ryzyko", fontsize=13)
+        axs[0, 1].set_ylabel("Wartość Ryzyka")
+        axs[0, 1].grid(axis='y', linestyle='--', alpha=0.5)
+
+        # 3. Czas lotu (Twój algorytm wygrywa mimo dłuższej trasy!)
+        axs[1, 0].bar(labels, time_vals, color=colors, edgecolor='black', alpha=0.9)
+        axs[1, 0].set_title("3. Fizyczny Czas Przelotu (Kinematyka) [s]", fontsize=13)
+        axs[1, 0].set_ylabel("Sekundy")
+        axs[1, 0].grid(axis='y', linestyle='--', alpha=0.5)
+
+        # 4. Płynność / Zakręty (Twój algorytm wygrywa)
+        axs[1, 1].bar(labels, turns_vals, color=colors, edgecolor='black', alpha=0.9)
+        axs[1, 1].set_title("4. Liczba Wykonanych Manewrów (Płynność)", fontsize=13)
+        axs[1, 1].set_ylabel("Zakręty")
+        axs[1, 1].grid(axis='y', linestyle='--', alpha=0.5)
+
+        # Dodanie cyfrowych wartości na szczycie słupków
+        for ax, vals in zip([axs[0, 0], axs[0, 1], axs[1, 0], axs[1, 1]],
+                            [dist_vals, risk_vals, time_vals, turns_vals]):
+            max_v = max(vals) if max(vals) > 0 else 1
+            for i, v in enumerate(vals):
+                ax.text(i, v + (max_v * 0.02), f"{v:.1f}", ha='center', va='bottom', fontweight='bold', fontsize=11)
+
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        filename3 = os.path.join(output_dir, "3_algorithm_comparison_benchmark.png")
+        plt.savefig(filename3, dpi=300, bbox_inches='tight')
+        print(f"Zapisano: {filename3}")
+        plt.close(fig3)
 
     print("\nGotowe! Wszystkie wykresy zapisano w folderze 'research_results'.")

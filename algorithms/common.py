@@ -111,3 +111,87 @@ def generate_analysis_table(
             print(f"{w:<10.1f} | BRAK TRASY")
 
     print("-" * 90)
+
+def calculate_kinematic_flight_time(path: List[Tuple[int, int]],
+                                    mass: float = 30.0,
+                                    max_thrust_net: float = 120.0,
+                                    v_max_kmh: float = 65.0) -> float:
+    """
+    Model kinematyczny BSP: Oblicza realistyczny czas przelotu trasy.
+    Uwzględnia masę, przyspieszenie, V_max oraz konieczność hamowania przed zakrętami.
+    """
+    if len(path) < 2:
+        return 0.0
+
+    # 1. Konwersja jednostek i parametry fizyczne
+    v_max = v_max_kmh / 3.6  # 65 km/h -> ~18.05 m/s
+    a = max_thrust_net / mass  # np. 120N / 30kg = 4.0 m/s^2
+
+    # 2. Wyodrębnienie prostych odcinków (zamiast analizować siatkę kratka po kratce)
+    segments = []  # Długości prostych odcinków w metrach
+    turn_angles = []  # Kąty między odcinkami w radianach
+
+    current_len = 0.0
+    last_dir = None
+
+    for i in range(1, len(path)):
+        dx = path[i][0] - path[i - 1][0]
+        dy = path[i][1] - path[i - 1][1]
+        dist = math.sqrt(dx ** 2 + dy ** 2)
+        curr_dir = (dx, dy)
+
+        if last_dir is not None and curr_dir != last_dir:
+            # Obliczenie kąta zakrętu (Iloczyn skalarny)
+            dot = last_dir[0] * curr_dir[0] + last_dir[1] * curr_dir[1]
+            mag1 = math.sqrt(last_dir[0] ** 2 + last_dir[1] ** 2)
+            mag2 = math.sqrt(curr_dir[0] ** 2 + curr_dir[1] ** 2)
+            cos_theta = max(-1.0, min(1.0, dot / (mag1 * mag2)))
+            angle = math.acos(cos_theta)
+
+            segments.append(current_len)
+            turn_angles.append(angle)
+            current_len = dist
+        else:
+            current_len += dist
+
+        last_dir = curr_dir
+
+    segments.append(current_len)
+
+    # 3. Modelowanie Prędkości w węzłach (zakrętach)
+    # Dron musi zwolnić na zakręcie proporcjonalnie do jego ostrości
+    turn_velocities = []
+    for angle in turn_angles:
+        v_turn = v_max * (1.0 - (angle / math.pi))  # 180 st = 0 m/s, linia prosta = V_max
+        turn_velocities.append(max(1.0, v_turn))  # Zabezpieczenie minimalnej prędkości w zakręcie
+
+    # Prędkość początkowa (V_0) = 0 i końcowa (V_k) = 0
+    node_velocities = [0.0] + turn_velocities + [0.0]
+
+    total_time = 0.0
+
+    # 4. Obliczenia kinematyczne dla każdego odcinka z wykorzystaniem profilu trapezowego
+    for i, L in enumerate(segments):
+        v_start = node_velocities[i]
+        v_end = node_velocities[i + 1]
+
+        # Max prędkość możliwa do osiągnięcia z uwzględnieniem przyspieszania i hamowania
+        # Wynika ze wzoru kinematycznego na dystans przy stałym przyspieszeniu
+        v_reach = math.sqrt(max(0, a * L + (v_start ** 2 + v_end ** 2) / 2.0))
+
+        if v_reach >= v_max:
+            # Dron osiąga V_max (profil trapezowy)
+            t_acc = (v_max - v_start) / a
+            t_dec = (v_max - v_end) / a
+            d_acc = (v_max ** 2 - v_start ** 2) / (2 * a)
+            d_dec = (v_max ** 2 - v_end ** 2) / (2 * a)
+            d_cruise = max(0, L - d_acc - d_dec)
+            t_cruise = d_cruise / v_max
+            total_time += (t_acc + t_cruise + t_dec)
+        else:
+            # Dron nie ma miejsca na osiągnięcie V_max (profil trójkątny)
+            t_acc = abs(v_reach - v_start) / a
+            t_dec = abs(v_reach - v_end) / a
+            total_time += (t_acc + t_dec)
+
+    return total_time

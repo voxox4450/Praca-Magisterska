@@ -3,7 +3,7 @@ import time
 import math
 from typing import List, Tuple, Dict, Any
 from environment.grid_map import GridMap
-from algorithms.common import Node, reconstruct_path
+from algorithms.common import Node, reconstruct_path, calculate_kinematic_flight_time
 
 
 def run_risk_astar(
@@ -11,16 +11,23 @@ def run_risk_astar(
         start: Tuple[int, int],
         goal: Tuple[int, int],
         risk_weight: float = 20.0,
-        turn_penalty: float = 2.0,  # Kara za skręt (dla płynności)
-        drone_radius: float = 3.0
+        turn_penalty: float = 2.0,
+        drone_radius: float = 3.0,
+        initial_direction: Tuple[int, int] = (0, 0),
+        current_speed: float = 0.0
 ) -> Tuple[List[Tuple[int, int]], Dict[str, Any]]:
     t0 = time.time()
 
-    start_node = Node(start[0], start[1], 0.0, direction=(0, 0))
+    start_node = Node(start[0], start[1], 0.0, direction=initial_direction)
+    start_node.physical_dist = 0.0
+    start_node.straight_steps = 100  # Dron na start jest ustabilizowany (może wykonać 1 manewr)
+
     open_list = []
     heapq.heappush(open_list, start_node)
 
-    g_score = {(start[0], start[1]): 0.0}
+    # --- NOWOŚĆ: Kinematyczny klucz stanu A* (X, Y, Wektor X, Wektor Y) ---
+    # Algorytm wie, z której strony nadlatuje, by blokować nakładające się zakręty!
+    g_score = {(start[0], start[1], initial_direction[0], initial_direction[1]): 0.0}
     visited = set()
     nodes_expanded = 0
 
@@ -31,14 +38,19 @@ def run_risk_astar(
         if (current.x, current.y) == goal:
             execution_time = time.time() - t0
             path, length, total_risk, turns = reconstruct_path(current, grid_map)
+            flight_time = calculate_kinematic_flight_time(path, mass=30.0, max_thrust_net=120.0, v_max_kmh=65.0)
+
             return path, {
                 "found": True, "time": execution_time, "length": length,
-                "risk": total_risk, "turns": turns, "nodes": nodes_expanded
+                "risk": total_risk, "turns": turns, "nodes": nodes_expanded,
+                "flight_time": flight_time
             }
 
-        if (current.x, current.y) in visited:
+        # Aktualizujemy sprawdzenie odwiedzonych węzłów o wektor lotu
+        state_key = (current.x, current.y, current.direction[0], current.direction[1])
+        if state_key in visited:
             continue
-        visited.add((current.x, current.y))
+        visited.add(state_key)
 
         for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]:
             nx, ny = current.x + dx, current.y + dy
@@ -50,42 +62,58 @@ def run_risk_astar(
             dist_cost = math.sqrt(dx ** 2 + dy ** 2)
             static_risk_cost = cell_risk * risk_weight
 
-            # --- POPRAWKA 1: DYNAMICZNA KARA ZA SKRĘT ---
+            # --- ZWALNIANIE Z KAŻDYM METREM ---
+            actual_dist = getattr(current, 'physical_dist', 0.0)
+            acceleration = 4.0
+            node_speed = math.sqrt(max(0.0, current_speed ** 2 - 2 * acceleration * actual_dist))
+
+            v1 = current.direction
+            v2 = (dx, dy)
+            straight_steps = getattr(current, 'straight_steps', 100)
+
             turn_cost = 0.0
-            if current.parent is not None:
-                # v1: poprzedni kierunek, v2: obecny kierunek
-                v1 = current.direction
-                v2 = (dx, dy)
+            new_straight_steps = straight_steps + 1
 
-                if v1 != v2:
-                    # Obliczamy "ostrość" skrętu.
-                    # Jeśli zmieniamy kierunek tylko o 45 stopni, kara powinna być mniejsza.
-                    # Iloczyn skalarny v1*v2 powie nam o kącie.
-                    dot_product = v1[0] * v2[0] + v1[1] * v2[1]
+            if v1 != (0, 0) and v1 != v2:
+                dot_product = v1[0] * v2[0] + v1[1] * v2[1]
+                mag1 = math.sqrt(v1[0] ** 2 + v1[1] ** 2)
+                mag2 = math.sqrt(v2[0] ** 2 + v2[1] ** 2)
+                cos_theta = max(-1.0, min(1.0, dot_product / (mag1 * mag2)))
+                angle = math.acos(cos_theta)
+                angle_deg = math.degrees(angle)
 
-                    # Normalizacja dla ruchów diagonalnych
-                    mag1 = math.sqrt(v1[0] ** 2 + v1[1] ** 2)
-                    mag2 = math.sqrt(v2[0] ** 2 + v2[1] ** 2)
-                    cos_theta = dot_product / (mag1 * mag2)
+                # 1. TWARDA BARIERA KĄTA
+                if node_speed > 5.0:
+                    max_allowed_angle = 45.0
+                else:
+                    speed_factor = node_speed / 5.0
+                    max_allowed_angle = 180.0 - (speed_factor * 135.0)
 
-                    # Zapobiegamy błędom zaokrągleń dla acos
-                    cos_theta = max(-1.0, min(1.0, cos_theta))
-                    angle = math.acos(cos_theta)  # kąt w radianach
+                if angle_deg > (max_allowed_angle + 1.0):
+                    continue  # Kąt zbyt ostry dla tej prędkości!
 
-                    # Kara proporcjonalna do kąta (turn_penalty * kąt)
-                    turn_cost = turn_penalty * (angle / (math.pi / 2))
+                # 2. BLOKADA PĘDU (WYMUSZONY PROMIEŃ SKRĘTU)
+                # Dron musi przelecieć prosto X metrów, zanim będzie mógł skręcić ponownie.
+                # Przy 15 m/s potrzebuje aż 5 metrów stabilizacji. Przy 3 m/s wystarczy 1 metr.
+                required_straight_steps = int(node_speed / 3.0)
+                if straight_steps < required_straight_steps:
+                    continue  # Zakaz skrętu! Dron jest w trakcie ustabilizowania po poprzednim manewrze!
+
+                new_straight_steps = 0  # Skręt udany, resetujemy licznik lotu prosto
+                turn_cost = turn_penalty * (angle / (math.pi / 2))
 
             new_g = current.cost + dist_cost + static_risk_cost + turn_cost
+            neighbor_key = (nx, ny, dx, dy)
 
-            if (nx, ny) not in g_score or new_g < g_score[(nx, ny)]:
-                g_score[(nx, ny)] = new_g
-
-                # --- POPRAWKA 2: TIE-BREAKER (PROSTOWANIE TRASY) ---
-                # Mnożymy heurystykę przez 1.001, aby algorytm preferował
-                # punkty bliższe linii prostej do celu przy tej samej wadze.
+            if neighbor_key not in g_score or new_g < g_score[neighbor_key]:
+                g_score[neighbor_key] = new_g
                 h = math.sqrt((nx - goal[0]) ** 2 + (ny - goal[1]) ** 2) * 1.001
-
                 neighbor = Node(nx, ny, new_g, current, direction=(dx, dy), heuristic=h)
+
+                # Przekazanie fizyki do kolejnego węzła
+                neighbor.physical_dist = actual_dist + dist_cost
+                neighbor.straight_steps = new_straight_steps
+
                 heapq.heappush(open_list, neighbor)
 
     return [], {"found": False, "time": 0, "length": 0, "risk": 0, "turns": 0, "nodes": nodes_expanded}
