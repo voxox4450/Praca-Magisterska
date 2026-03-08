@@ -85,7 +85,7 @@ def generate_analysis_table(
     Wspólna funkcja do generowania tabeli analizy dla różnych wag ryzyka.
     Używana zarówno w trybie offline jak i online.
     """
-    risk_weights = [float(x) for x in range(0, 101, 5)]
+    risk_weights = [float(x) for x in range(0, 51, 5)]
 
     print("-" * 90)
     print(f"{table_title}")
@@ -162,8 +162,13 @@ def calculate_kinematic_flight_time(path: List[Tuple[int, int]],
     # Dron musi zwolnić na zakręcie proporcjonalnie do jego ostrości
     turn_velocities = []
     for angle in turn_angles:
-        v_turn = v_max * (1.0 - (angle / math.pi))  # 180 st = 0 m/s, linia prosta = V_max
-        turn_velocities.append(max(1.0, v_turn))  # Zabezpieczenie minimalnej prędkości w zakręcie
+        # Fizyczny rzut wektora prędkości.
+        # 0 st = V_max (cos(0)=1)
+        # 90 st = 0 m/s (cos(90)=0) - dron musi wyhamować, żeby skręcić pod kątem prostym!
+        v_turn = v_max * max(0.0, math.cos(angle))
+
+        # Dajemy minimalną prędkość 0.5 m/s na "obrócenie się" w miejscu
+        turn_velocities.append(max(0.5, v_turn))
 
     # Prędkość początkowa (V_0) = 0 i końcowa (V_k) = 0
     node_velocities = [0.0] + turn_velocities + [0.0]

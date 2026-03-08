@@ -5,16 +5,17 @@ from typing import List, Tuple, Dict, Any
 from environment.grid_map import GridMap
 from algorithms.common import Node, reconstruct_path, calculate_kinematic_flight_time
 
-
 def run_dijkstra(
         grid_map: GridMap,
         start: Tuple[int, int],
         goal: Tuple[int, int],
-        collision_radius: float = 3.0
+        risk_weight: float = 20.0,  # <--- DODAŁEM WAGĘ RYZYKA
+        turn_penalty: float = 2.0,
+        drone_radius: float = 3.0,
+        initial_direction: Tuple[int, int] = (0, 0), # <-- Opcjonalne dla dynamiki
+        current_speed: float = 0.0
 ) -> Tuple[List[Tuple[int, int]], Dict[str, Any]]:
     t0 = time.time()
-
-    # Dodano inicjalizację kierunku, aby móc wyłapać zakręty
     start_node = Node(start[0], start[1], 0.0, direction=(0, 0))
     open_list = []
     heapq.heappush(open_list, start_node)
@@ -29,14 +30,12 @@ def run_dijkstra(
         if (current.x, current.y) == goal:
             execution_time = time.time() - t0
             path, length, total_risk, turns = reconstruct_path(current, grid_map)
-
-            # --- OBLICZANIE FIZYCZNEGO CZASU LOTU ---
             flight_time = calculate_kinematic_flight_time(path, mass=30.0, max_thrust_net=120.0, v_max_kmh=65.0)
 
             return path, {
                 "found": True, "time": execution_time, "length": length,
                 "risk": total_risk, "turns": turns, "nodes": nodes_expanded,
-                "flight_time": flight_time  # <--- NOWA DANA
+                "flight_time": flight_time
             }
 
         if (current.x, current.y) in visited:
@@ -46,25 +45,24 @@ def run_dijkstra(
         for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]:
             nx, ny = current.x + dx, current.y + dy
 
-            # Sprawdzamy czy dron się zmieści fizycznie
-            if grid_map.is_collision(nx, ny, drone_radius=collision_radius):
+            if grid_map.is_collision(nx, ny, drone_radius=drone_radius):
                 continue
 
+            # DIJKSTRA WIDZI RYZYKO (ALGO IDENTYCZNE WEJŚCIE)
+            cell_risk = grid_map.get_cost(nx, ny)
+            static_risk_cost = cell_risk * risk_weight
             dist_cost = math.sqrt(dx ** 2 + dy ** 2)
 
-            # --- ZMIANA: TIE-BREAKER ELIMINUJĄCY ZYGZAKI ---
-            # Dodajemy mikroskopijną karę, jeśli dron nie leci prosto.
-            # To nie zmienia realnego wyniku trasy, ale zmusza algorytm do rysowania "ładnych" prostych linii.
             turn_cost = 0.0
             if current.parent is not None:
-                if current.direction != (dx, dy):
-                    turn_cost = 0.001
+                if current.direction != (0, 0) and current.direction != (dx, dy):
+                    # Każda zmiana kierunku otrzymuje stałą karę zdefiniowaną na wejściu
+                    turn_cost = turn_penalty
 
-            new_g = current.cost + dist_cost + turn_cost
+            new_g = current.cost + dist_cost + static_risk_cost + turn_cost
 
             if (nx, ny) not in g_score or new_g < g_score[(nx, ny)]:
                 g_score[(nx, ny)] = new_g
-                # Zapisujemy obrany kierunek (dx, dy)
                 neighbor = Node(nx, ny, new_g, current, direction=(dx, dy), heuristic=0.0)
                 heapq.heappush(open_list, neighbor)
 

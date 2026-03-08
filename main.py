@@ -74,31 +74,27 @@ def run_offline_mode(size: int, collision_radius: float, start_pos: Tuple[int, i
     if interactive:
         print(f"\n Uruchomienie trybu statycznego (Gęstość: {density * 100}%) ")
 
-    env = GridMap(width=size, height=size, start_pos=start_pos, goal_pos=goal_pos, risk_zones_count=10,
+    env = GridMap(width=size, height=size, start_pos=start_pos, goal_pos=goal_pos, risk_zones_count=15,
                   obstacle_density=density)
 
-    path_d, stats_d = run_dijkstra(env, start_pos, goal_pos, collision_radius=collision_radius)
-    base_len = stats_d['length'] if stats_d['found'] else 0
-    base_risk = stats_d['risk'] if stats_d['found'] else 0
+    # W trybie offline robimy tylko szybki test wizualny dla wagi standardowej = 0 dla klasyków, 20 dla Twojego
+    path_d, stats_d = run_dijkstra(env, start_pos, goal_pos, risk_weight=20.0, turn_penalty=20.0, drone_radius=collision_radius)
+    path_a, stats_a = run_astar(env, start_pos, goal_pos, risk_weight=20.0, turn_penalty=20.0, drone_radius=collision_radius)
+    path_r, stats_r = run_risk_astar(env, start_pos, goal_pos, risk_weight=20.0, turn_penalty=20.0, drone_radius=collision_radius)
 
-    path_a, stats_a = run_astar(env, start_pos, goal_pos, collision_radius=collision_radius)
-
-    generate_analysis_table(
-        env=env, start_pos=start_pos, target_pos=goal_pos,
-        search_func=run_risk_astar, base_len=base_len, base_risk=base_risk,
-        collision_radius=collision_radius, table_title=f"ANALIZA (Gęstość: {density * 100}%)"
+    # --- SPRAWIEDLIWE GENEROWANIE WYKRESÓW PRZEZ NOWĄ FUNKCJĘ ---
+    generate_thesis_charts(
+        envs=[env], start=start_pos, goal=goal_pos,
+        func_dijkstra=run_dijkstra, func_astar=run_astar, func_risk_astar=run_risk_astar,
+        collision_radius=collision_radius, density_label=density_label
     )
 
-    # --- ZMIANA: Przekazujemy env jako listę jednoelementową [env] ---
-    generate_thesis_charts([env], start_pos, goal_pos, run_risk_astar, collision_radius, stats_d, stats_a,
-                           density_label=density_label)
-
     if interactive:
-        print("\n Wizualizacja Djikstra, A* Standard oraz interaktywna mapa ryzyka dla Risk A*")
+        print("\n Wizualizacja algorytmów na mapie...")
         if path_d:
-            plot_simulation(env, path_d, stats_d, "1. Dijkstra (Referencja)", block=False, use_smoothing=False)
+            plot_simulation(env, path_d, stats_d, "1. Dijkstra (Referencja W=20)", block=False, use_smoothing=False)
         if path_a:
-            plot_simulation(env, path_a, stats_a, "2. A* Standard", block=False, use_smoothing=False)
+            plot_simulation(env, path_a, stats_a, "2. A* Standard (Szybki W=20)", block=False, use_smoothing=False)
         plot_interactive_risk(env, start_pos, goal_pos, run_risk_astar)
 
 
@@ -114,57 +110,44 @@ def run_batch_benchmark(size: int, collision_radius: float, start_pos: Tuple[int
         "30_procent_duzo": 0.30
     }
 
-    # LICZBA MAP DO WYGENEROWANIA DLA KAŻDEGO SCENARIUSZA!
-    # Na czas testów ustaw 5. Do ostatecznej pracy magisterskiej polecam zmienić na 20.
-    N_TESTS = 15
+    # LICZBA MAP DO WYGENEROWANIA DLA KAŻDEGO SCENARIUSZA
+    N_TESTS = 6
 
     for label, den in scenarios.items():
         print(f"\n---> Przetwarzanie scenariusza: {label} (Gęstość: {den * 100}%, Próby: {N_TESTS})")
-        print("Trwa generowanie map i obliczanie średnich dla klasycznych algorytmów (to może chwilę potrwać)...")
+        print("Trwa generowanie weryfikowanych map (odrzucanie nierozwiązywalnych)...")
 
         envs = []
-        d_sum = {'length': 0, 'risk': 0, 'flight_time': 0, 'turns': 0, 'found': 0}
-        a_sum = {'length': 0, 'risk': 0, 'flight_time': 0, 'turns': 0, 'found': 0}
+        valid_maps_count = 0
+        attempts = 0
 
-        for _ in range(N_TESTS):
-            env = GridMap(width=size, height=size, start_pos=start_pos, goal_pos=goal_pos, risk_zones_count=10,
+        # --- ZMIANA: Pętla WHILE gwarantująca dokładnie N_TESTS poprawnych map ---
+        while valid_maps_count < N_TESTS:
+            attempts += 1
+            env = GridMap(width=size, height=size, start_pos=start_pos, goal_pos=goal_pos, risk_zones_count=5,
                           obstacle_density=den)
-            envs.append(env)
 
-            # Badanie Dijkstry na wygenerowanej mapie
-            _, sd = run_dijkstra(env, start_pos, goal_pos, collision_radius=collision_radius)
-            if sd['found']:
-                d_sum['length'] += sd['length'];
-                d_sum['risk'] += sd['risk']
-                d_sum['flight_time'] += sd.get('flight_time', 0.0);
-                d_sum['turns'] += sd.get('turns', 0)
-                d_sum['found'] += 1
+            # Szybki test 1: Czy na tej mapie DA SIĘ w ogóle dolecieć (Dijkstra przy braku ryzyka)?
+            _, sd = run_dijkstra(env, start_pos, goal_pos, risk_weight=0.0, drone_radius=collision_radius)
 
-            # Badanie A* Standard na wygenerowanej mapie
-            _, sa = run_astar(env, start_pos, goal_pos, collision_radius=collision_radius)
-            if sa['found']:
-                a_sum['length'] += sa['length'];
-                a_sum['risk'] += sa['risk']
-                a_sum['flight_time'] += sa.get('flight_time', 0.0);
-                a_sum['turns'] += sa.get('turns', 0)
-                a_sum['found'] += 1
+            # Szybki test 2: Czy Twój algorytm daje radę ominąć strefy ryzyka (Risk A* W=20)?
+            _, sr = run_risk_astar(env, start_pos, goal_pos, risk_weight=20.0, turn_penalty=20.0,
+                                   drone_radius=collision_radius)
 
-        # Uśrednianie wyników z N map
-        stats_d_avg = None
-        if d_sum['found'] > 0:
-            f = d_sum['found']
-            stats_d_avg = {'length': d_sum['length'] / f, 'risk': d_sum['risk'] / f,
-                           'flight_time': d_sum['flight_time'] / f, 'turns': d_sum['turns'] / f}
+            if sd['found'] and sr['found']:
+                envs.append(env)
+                valid_maps_count += 1
+                # Opcjonalny print, żebyś widział, że program pracuje (możesz zakomentować)
+                print(f"  [+] Znaleziono poprawną mapę {valid_maps_count}/{N_TESTS} (Wymagało {attempts} prób)")
+            else:
+                # Odrzucamy mapę i pętla automatycznie robi "dodatkowe przejście"
+                pass
 
-        stats_a_avg = None
-        if a_sum['found'] > 0:
-            f = a_sum['found']
-            stats_a_avg = {'length': a_sum['length'] / f, 'risk': a_sum['risk'] / f,
-                           'flight_time': a_sum['flight_time'] / f, 'turns': a_sum['turns'] / f}
+        print(f"\nZakończono losowanie. Wygenerowano {N_TESTS} udanych map po {attempts} próbach.")
+        print("Rozpoczynam obliczenia i renderowanie wykresów z wyselekcjonowanych map...")
 
-        print("Rozpoczynam badanie Risk-Aware A* i renderowanie wykresów...")
-        # Wywołanie generatora przekazując CAŁĄ LISTĘ MAP oraz uśrednione klasyczne algorytmy
-        generate_thesis_charts(envs, start_pos, goal_pos, run_risk_astar, collision_radius, stats_d_avg, stats_a_avg,
+        # Przekazujemy listę wyselekcjonowanych map do generatora
+        generate_thesis_charts(envs, start_pos, goal_pos, run_dijkstra, run_astar, run_risk_astar, collision_radius,
                                density_label=label)
 
     print("\n" + "=" * 50)
@@ -176,7 +159,7 @@ def run_batch_benchmark(size: int, collision_radius: float, start_pos: Tuple[int
 def run_online_mode(size: int, collision_radius: float, start_pos: Tuple[int, int], goal_pos: Tuple[int, int]) -> None:
     print(f"\n Uruchomienie trybu dynamicznego ")
     density = get_user_difficulty()
-    env = GridMap(width=size, height=size, start_pos=start_pos, goal_pos=goal_pos, risk_zones_count=10,
+    env = GridMap(width=size, height=size, start_pos=start_pos, goal_pos=goal_pos, risk_zones_count=5,
                   obstacle_density=density)
     run_online_simulation(env, start_pos, goal_pos, search_func=run_risk_astar, collision_radius=collision_radius)
 

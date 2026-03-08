@@ -86,25 +86,27 @@ class GridMap:
         return 1.0
 
     def is_collision(self, x, y, drone_radius: float = 3.0) -> bool:
-        if not (0 <= x < self.width and 0 <= y < self.height):
+        # 1. Zabezpieczenie krawędzi mapy (Tylko FIZYCZNY promień drona)
+        # Wiemy, że fizyczny promień to 1.0 (margin = 1 kratka).
+        # Dron może lecieć blisko krawędzi mapy, byle z niej nie wyleciał.
+        physical_margin = 1
+        if not (physical_margin <= x < self.width - physical_margin and physical_margin <= y < self.height - physical_margin):
             return True
 
-        # 1. Kolizja Statyczna (Budynki) + POPRAWKA NA SKOSY
+        # 2. Kolizja Statyczna (Budynki) + POPRAWKA NA SKOSY
+        # Tutaj używamy pełnego drone_radius (czyli 3.0: 1m drona + 2m marginesu od ścian)
         # Mnożnik 1.41 (sqrt(2)) zapewnia, że dystans 3.0m jest liczony
         # jako 3 pełne kratki nawet po przekątnej narożnika.
-        if self.dist_matrix[x,y] <= (drone_radius*1.41):
+        if self.dist_matrix[x, y] <= (drone_radius * 1.41):
             return True
 
-        # 2. Kolizja Logiczna (Wartość ryzyka na mapie)
-        # Gwarantuje, że dron nigdy nie wejdzie w pole o ryzyku >= 0.9 (np. ogień)
+        # 3. Kolizja Logiczna (Wartość ryzyka na mapie)
         if self.grid[x, y] >= 0.90:
             return True
 
-        # 2. Kolizja Dynamiczna (Strefy Ryzyka)
-        # Margines bezpieczeństwa: 1 metr (żeby nie "szorował" po ogniu)
+        # 4. Kolizja Dynamiczna (Strefy Ryzyka)
         for (ox, oy, r) in self.dynamic_obstacles:
             dist = np.sqrt((x - ox) ** 2 + (y - oy) ** 2)
-            # Wymagany dystans = Promień przeszkody + Promień drona + Bufor
             required_dist = r + drone_radius
 
             if dist <= required_dist:

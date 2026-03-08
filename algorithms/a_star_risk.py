@@ -19,7 +19,8 @@ def run_risk_astar(
     t0 = time.time()
 
     start_node = Node(start[0], start[1], 0.0, direction=initial_direction)
-    start_node.physical_dist = 0.0
+    # Zamiast physical_dist (dystans całkowity), śledzimy dystans przeleciany prosto od ostatniego zakrętu
+    start_node.straight_dist = 0.0
     start_node.straight_steps = 100  # Dron na start jest ustabilizowany (może wykonać 1 manewr)
 
     open_list = []
@@ -59,13 +60,19 @@ def run_risk_astar(
                 continue
 
             cell_risk = grid_map.get_cost(nx, ny)
-            dist_cost = math.sqrt(dx ** 2 + dy ** 2)
             static_risk_cost = cell_risk * risk_weight
+            dist_cost = math.sqrt(dx ** 2 + dy ** 2)
 
-            # --- ZWALNIANIE Z KAŻDYM METREM ---
-            actual_dist = getattr(current, 'physical_dist', 0.0)
+            # --- MODEL FIZYCZNY: PRZYSPIESZANIE W LOCIE PROSTYM ---
             acceleration = 4.0
-            node_speed = math.sqrt(max(0.0, current_speed ** 2 - 2 * acceleration * actual_dist))
+            v_max = 18.0
+
+            # Pobieramy dystans pokonany po prostej od ostatniego manewru (lub startu)
+            straight_dist = getattr(current, 'straight_dist', 0.0)
+
+            # Dron przyspiesza (v^2 = v_0^2 + 2as). Zabezpieczamy przed przekroczeniem V_max
+            node_speed = math.sqrt(current_speed ** 2 + 2 * acceleration * straight_dist)
+            node_speed = min(v_max, node_speed)
 
             v1 = current.direction
             v2 = (dx, dy)
@@ -107,11 +114,22 @@ def run_risk_astar(
 
             if neighbor_key not in g_score or new_g < g_score[neighbor_key]:
                 g_score[neighbor_key] = new_g
-                h = math.sqrt((nx - goal[0]) ** 2 + (ny - goal[1]) ** 2) * 1.001
+
+                # --- POPRAWKA HEURYSTYKI: Twardy limit zapobiegający efektowi "Greedy" ---
+                # Używamy łagodniejszego skalowania i blokujemy mnożnik na maksymalnej wartości 2.5
+                heuristic_multiplier = min(2.5, 1.0 + (risk_weight * 0.05))
+                h = math.sqrt((nx - goal[0]) ** 2 + (ny - goal[1]) ** 2) * heuristic_multiplier
+
                 neighbor = Node(nx, ny, new_g, current, direction=(dx, dy), heuristic=h)
 
                 # Przekazanie fizyki do kolejnego węzła
-                neighbor.physical_dist = actual_dist + dist_cost
+                if turn_cost > 0.0:
+                    # Był zakręt! Dron musi zwolnić, by go wykonać, więc resetujemy dystans przyspieszania
+                    neighbor.straight_dist = dist_cost
+                else:
+                    # Leci prosto dalej, kontynuujemy przyspieszanie
+                    neighbor.straight_dist = straight_dist + dist_cost
+
                 neighbor.straight_steps = new_straight_steps
 
                 heapq.heappush(open_list, neighbor)
