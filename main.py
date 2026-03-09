@@ -111,7 +111,7 @@ def run_batch_benchmark(size: int, collision_radius: float, start_pos: Tuple[int
     }
 
     # LICZBA MAP DO WYGENEROWANIA DLA KAŻDEGO SCENARIUSZA
-    N_TESTS = 6
+    N_TESTS = 5
 
     for label, den in scenarios.items():
         print(f"\n---> Przetwarzanie scenariusza: {label} (Gęstość: {den * 100}%, Próby: {N_TESTS})")

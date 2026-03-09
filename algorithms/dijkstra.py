@@ -1,69 +1,16 @@
-import heapq
-import time
-import math
 from typing import List, Tuple, Dict, Any
 from environment.grid_map import GridMap
-from algorithms.common import Node, reconstruct_path, calculate_kinematic_flight_time
+from algorithms.common import base_search  # lub import z miejsca, gdzie ją umieścisz
+
 
 def run_dijkstra(
-        grid_map: GridMap,
-        start: Tuple[int, int],
-        goal: Tuple[int, int],
-        risk_weight: float = 20.0,  # <--- DODAŁEM WAGĘ RYZYKA
-        turn_penalty: float = 2.0,
-        drone_radius: float = 3.0,
-        initial_direction: Tuple[int, int] = (0, 0), # <-- Opcjonalne dla dynamiki
-        current_speed: float = 0.0
+        grid_map: GridMap, start: Tuple[int, int], goal: Tuple[int, int],
+        risk_weight: float = 20.0, turn_penalty: float = 2.0, drone_radius: float = 3.0,
+        initial_direction: Tuple[int, int] = (0, 0), current_speed: float = 0.0
 ) -> Tuple[List[Tuple[int, int]], Dict[str, Any]]:
-    t0 = time.time()
-    start_node = Node(start[0], start[1], 0.0, direction=(0, 0))
-    open_list = []
-    heapq.heappush(open_list, start_node)
-    g_score = {(start[0], start[1]): 0.0}
-    visited = set()
-    nodes_expanded = 0
-
-    while open_list:
-        current = heapq.heappop(open_list)
-        nodes_expanded += 1
-
-        if (current.x, current.y) == goal:
-            execution_time = time.time() - t0
-            path, length, total_risk, turns = reconstruct_path(current, grid_map)
-            flight_time = calculate_kinematic_flight_time(path, mass=30.0, max_thrust_net=120.0, v_max_kmh=65.0)
-
-            return path, {
-                "found": True, "time": execution_time, "length": length,
-                "risk": total_risk, "turns": turns, "nodes": nodes_expanded,
-                "flight_time": flight_time
-            }
-
-        if (current.x, current.y) in visited:
-            continue
-        visited.add((current.x, current.y))
-
-        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]:
-            nx, ny = current.x + dx, current.y + dy
-
-            if grid_map.is_collision(nx, ny, drone_radius=drone_radius):
-                continue
-
-            # DIJKSTRA WIDZI RYZYKO (ALGO IDENTYCZNE WEJŚCIE)
-            cell_risk = grid_map.get_cost(nx, ny)
-            static_risk_cost = cell_risk * risk_weight
-            dist_cost = math.sqrt(dx ** 2 + dy ** 2)
-
-            turn_cost = 0.0
-            if current.parent is not None:
-                if current.direction != (0, 0) and current.direction != (dx, dy):
-                    # Każda zmiana kierunku otrzymuje stałą karę zdefiniowaną na wejściu
-                    turn_cost = turn_penalty
-
-            new_g = current.cost + dist_cost + static_risk_cost + turn_cost
-
-            if (nx, ny) not in g_score or new_g < g_score[(nx, ny)]:
-                g_score[(nx, ny)] = new_g
-                neighbor = Node(nx, ny, new_g, current, direction=(dx, dy), heuristic=0.0)
-                heapq.heappush(open_list, neighbor)
-
-    return [], {"found": False, "time": 0, "length": 0, "risk": 0, "turns": 0, "nodes": nodes_expanded}
+    return base_search(
+        grid_map, start, goal, risk_weight, turn_penalty, drone_radius,
+        initial_direction, current_speed,
+        use_heuristic=False,
+        use_kinematics=False
+    )
