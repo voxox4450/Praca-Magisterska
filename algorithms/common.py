@@ -161,13 +161,24 @@ def calculate_kinematic_flight_time(path: List[Tuple[int, int]],
     # 3. Modelowanie Prędkości w węzłach (zakrętach)
     # Dron musi zwolnić na zakręcie proporcjonalnie do jego ostrości
     turn_velocities = []
-    for angle in turn_angles:
-        # Fizyczny rzut wektora prędkości.
-        # 0 st = V_max (cos(0)=1)
-        # 90 st = 0 m/s (cos(90)=0) - dron musi wyhamować, żeby skręcić pod kątem prostym!
-        v_turn = v_max * max(0.0, math.cos(angle))
+    # Maksymalne przyspieszenie boczne (dośrodkowe), jakie dron może wytrzymać
+    # 7.0 m/s^2 to ok. 0.7g - bezpieczna wartość dla ciężkiego drona 30kg
+    max_lat_a = 7.0
 
-        # Dajemy minimalną prędkość 0.5 m/s na "obrócenie się" w miejscu
+    for angle in turn_angles:
+        # 1. Stary model (rzut wektora)
+        v_vector = v_max * max(0.0, math.cos(angle))
+
+        # 2. Model siły odśrodkowej
+        # Przyjmujemy przybliżony promień skrętu r.
+        # Na gridzie zakręt o kąt 'angle' przy 1m kratkach
+        # wymusza rzędu r = 1.5 / sin(angle/2)
+        r_approx = 1.5 / max(0.1, math.sin(angle / 2))
+        v_centripetal = math.sqrt(max_lat_a * r_approx)
+
+        # Prędkość na zakręcie to minimum z obu modeli
+        v_turn = min(v_vector, v_centripetal)
+
         turn_velocities.append(max(0.5, v_turn))
 
     # Prędkość początkowa (V_0) = 0 i końcowa (V_k) = 0

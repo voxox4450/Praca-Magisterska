@@ -92,9 +92,11 @@ def run_offline_mode(size: int, collision_radius: float, start_pos: Tuple[int, i
     if interactive:
         print("\n Wizualizacja algorytmów na mapie...")
         if path_d:
-            plot_simulation(env, path_d, stats_d, "1. Dijkstra (Referencja W=20)", block=False, use_smoothing=False)
+            plot_simulation(env, path_d, stats_d, "1. Dijkstra (Referencja W=20)", block=False,
+                            use_smoothing=True)  # <-- ZMIANA NA True
         if path_a:
-            plot_simulation(env, path_a, stats_a, "2. A* Standard (Szybki W=20)", block=False, use_smoothing=False)
+            plot_simulation(env, path_a, stats_a, "2. A* Standard (Szybki W=20)", block=False,
+                            use_smoothing=True)  # <-- ZMIANA NA True
         plot_interactive_risk(env, start_pos, goal_pos, run_risk_astar)
 
 
