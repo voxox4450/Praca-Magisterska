@@ -10,6 +10,11 @@ from typing import List, Tuple, Callable, Any, Dict
 from environment.grid_map import GridMap
 from algorithms.common import calculate_segment_risk, calculate_path_length, generate_analysis_table, calculate_kinematic_flight_time
 import os
+from config import (
+    V_MAX_MS, ACCELERATION, MAX_LATERAL_ACCEL, MIN_TURN_SPEED,
+    RISK_WEIGHT, TURN_PENALTY_CLASSIC, TURN_PENALTY_RISK,
+    PARETO_WEIGHT_MAX, PARETO_WEIGHT_STEP
+)
 
 
 def _plot_benchmark_bars(bench_data: dict, title: str, filename: str, w_label: str) -> None:
@@ -67,7 +72,7 @@ def _setup_ui_colorbars(fig, ax, img, speed_axes_rect: list,
 
     # Pasek Prędkości (położenie definiowane przez argument speed_axes_rect)
     cax_speed = fig.add_axes(speed_axes_rect)
-    sm = plt.cm.ScalarMappable(cmap=get_speed_cmap(), norm=plt.Normalize(0, 18.0))
+    sm = plt.cm.ScalarMappable(cmap=get_speed_cmap(), norm=plt.Normalize(0, V_MAX_MS))
     sm.set_array([])
     cbar_speed = fig.colorbar(sm, cax=cax_speed, orientation='horizontal')
     cbar_speed.set_label('Prędkość Kinematyczna [m/s]', color='white', labelpad=10)
@@ -139,9 +144,9 @@ def compute_path_speeds(path: List[Tuple[int, int]], initial_speed: float = 0.0)
     if len(path) < 2:
         return np.array([initial_speed] * len(path))
 
-    v_max = 18.0
-    a = 4.0
-    max_lat_a = 7.0  # Maksymalne przyspieszenie boczne (bezpieczne dla 30kg)
+    v_max = V_MAX_MS
+    a = ACCELERATION
+    max_lat_a = MAX_LATERAL_ACCEL
 
     speeds = np.zeros(len(path))
     turn_speeds = np.full(len(path), v_max)
@@ -159,27 +164,38 @@ def compute_path_speeds(path: List[Tuple[int, int]], initial_speed: float = 0.0)
                 cos_theta = max(-1.0, min(1.0, dot / (mag1 * mag2)))
                 angle = math.acos(cos_theta)
 
-                # --- NOWA LOGIKA FIZYCZNA ---
-                # 1. Prędkość wynikająca z geometrii (rzut wektora)
-                v_geom = v_max * max(0.0, math.cos(angle))
-
-                # 2. Prędkość wynikająca z siły dośrodkowej (żeby nie wypadł z trasy)
-                # r_approx to promień łuku na siatce grid
+                # Spójna fizyka z planistą (base_search w common.py):
+                # tylko fizyka dośrodkowa, bez v_geom = v_max*cos(angle)
                 r_approx = 1.5 / max(0.1, math.sin(angle / 2))
                 v_phys = math.sqrt(max_lat_a * r_approx)
 
-                # Wybieramy bezpieczniejszą (mniejszą) wartość
-                turn_speeds[i] = max(0.5, min(v_geom, v_phys))
+                turn_speeds[i] = max(MIN_TURN_SPEED, min(v_phys, v_max))
 
     speeds[0] = initial_speed
 
+    # Pass 1: W przód (Rozpędzanie)
     for i in range(1, len(path)):
         dist = math.hypot(path[i][0] - path[i - 1][0], path[i][1] - path[i - 1][1])
         speeds[i] = min(turn_speeds[i], math.sqrt(speeds[i - 1] ** 2 + 2 * a * dist), v_max)
 
+    # Pass 2: W tył (Hamowanie przed zakrętami) - WYCIĄGNIĘTE Z PIERWSZEJ PĘTLI
     for i in range(len(path) - 2, -1, -1):
         dist = math.hypot(path[i + 1][0] - path[i][0], path[i + 1][1] - path[i][1])
         speeds[i] = min(speeds[i], math.sqrt(speeds[i + 1] ** 2 + 2 * a * dist))
+
+    # --- GŁÓWNA POPRAWKA: Twardy warunek brzegowy --- WYCIĄGNIĘTE Z PIERWSZEJ PĘTLI
+    # Pętla wsteczna nie może "zmienić przeszłości".
+    # Jeśli dron wlatuje na trasę z zadanym pędem, to musi on zostać zachowany.
+    speeds[0] = initial_speed
+    for i in range(1, len(path)):
+        dist = math.hypot(path[i][0] - path[i - 1][0], path[i][1] - path[i - 1][1])
+
+        # Wyliczamy najniższą fizycznie możliwą prędkość w tym węźle (maksymalne wciśnięcie hamulca)
+        min_phys_speed = math.sqrt(max(0.0, speeds[i - 1] ** 2 - 2 * a * dist))
+
+        # Jeśli pętla wsteczna zażądała 3 m/s, a fizyka mówi, że zdążymy zwolnić max do 12 m/s,
+        # to fizyka WYGRYWA. Wpisujemy 12 m/s.
+        speeds[i] = max(speeds[i], min_phys_speed)
 
     return speeds
 
@@ -194,6 +210,25 @@ def smooth_path_with_speeds(path: List[Tuple[int, int]], speeds: np.ndarray) -> 
         u_new = np.linspace(0, 1, num=len(path) * 10)
         x_smooth, y_smooth = interp.splev(u_new, tck)
         speeds_smooth = interp.interp1d(u, speeds, kind='linear')(u_new)
+
+        # 3-pass: forward (przyspieszenie) → backward (hamowanie) → enforce start
+        a = ACCELERATION
+        for i in range(1, len(speeds_smooth)):
+            dist = math.hypot(x_smooth[i] - x_smooth[i-1], y_smooth[i] - y_smooth[i-1])
+            speeds_smooth[i] = min(speeds_smooth[i],
+                                   math.sqrt(max(0.0, speeds_smooth[i-1]**2 + 2*a*dist)))
+        for i in range(len(speeds_smooth)-2, -1, -1):
+            dist = math.hypot(x_smooth[i+1] - x_smooth[i], y_smooth[i+1] - y_smooth[i])
+            speeds_smooth[i] = min(speeds_smooth[i],
+                                   math.sqrt(max(0.0, speeds_smooth[i+1]**2 + 2*a*dist)))
+        # Prędkość startowa jest faktem fizycznym — backward pass nie może jej obniżyć
+        initial_v = speeds[0]
+        speeds_smooth[0] = initial_v
+        for i in range(1, len(speeds_smooth)):
+            dist = math.hypot(x_smooth[i] - x_smooth[i-1], y_smooth[i] - y_smooth[i-1])
+            min_phys = math.sqrt(max(0.0, speeds_smooth[i-1]**2 - 2*a*dist))
+            speeds_smooth[i] = max(speeds_smooth[i], min_phys)
+
         return x_smooth, y_smooth, speeds_smooth
     except Exception:
         return np.array(x), np.array(y), speeds
@@ -234,7 +269,7 @@ def plot_simulation(
         # --- UJEDNOLICONY STYL (Z trybu Online) ---
         lc_bg = LineCollection(segments, colors='#555555', linewidths=7, alpha=0.4, zorder=3)
 
-        lc = LineCollection(segments, cmap=get_speed_cmap(), norm=plt.Normalize(0, 18.0), zorder=4)
+        lc = LineCollection(segments, cmap=get_speed_cmap(), norm=plt.Normalize(0, V_MAX_MS), zorder=4)
         lc.set_array(segment_speeds)
         lc.set_linewidth(5)
 
@@ -287,7 +322,7 @@ def plot_interactive_risk(
 
     # --- UJEDNOLICONY STYL PUSTEJ KOLEKCJI ---
     lc_smooth_bg = LineCollection([], colors='#555555', linewidths=7, alpha=0.4, zorder=3)
-    lc_smooth = LineCollection([], cmap=get_speed_cmap(), linewidths=5, norm=plt.Normalize(0, 18.0), zorder=4)
+    lc_smooth = LineCollection([], cmap=get_speed_cmap(), linewidths=5, norm=plt.Normalize(0, V_MAX_MS), zorder=4)
     ax.add_collection(lc_smooth_bg)
     ax.add_collection(lc_smooth)
 
@@ -310,14 +345,14 @@ def plot_interactive_risk(
 
     # Suwak dostosowany szerokością do mapy
     ax_slider = plt.axes([0.15, 0.04, 0.70, 0.04], facecolor='#333333')
-    risk_slider = Slider(ax=ax_slider, label='Waga Ryzyka (W)', valmin=0.0, valmax=100.0, valinit=20.0, valstep=1.0,
+    risk_slider = Slider(ax=ax_slider, label='Waga Ryzyka (W)', valmin=0.0, valmax=100.0, valinit=RISK_WEIGHT, valstep=1.0,
                          color='cyan')
     risk_slider.label.set_color('white')
     risk_slider.valtext.set_color('white')
 
     def update(val):
         w = risk_slider.val
-        path, stats = search_func(grid_map, start, goal, risk_weight=w, turn_penalty=20.0)
+        path, stats = search_func(grid_map, start, goal, risk_weight=w, turn_penalty=TURN_PENALTY_RISK)
 
         if path:
             px = [p[0] for p in path]
@@ -347,7 +382,7 @@ def plot_interactive_risk(
         fig.canvas.draw_idle()
 
     risk_slider.on_changed(update)
-    update(20.0)
+    update(RISK_WEIGHT)
     plt.show(block=True)
     return risk_slider
 
@@ -359,7 +394,7 @@ def run_online_simulation(
         search_func: Callable,
         collision_radius: float
 ) -> None:
-    path_global, stats_global = search_func(env, start, goal, risk_weight=20.0, turn_penalty=20.0,
+    path_global, stats_global = search_func(env, start, goal, risk_weight=RISK_WEIGHT, turn_penalty=TURN_PENALTY_RISK,
                                             drone_radius=collision_radius)
 
     if not path_global:
@@ -377,7 +412,7 @@ def run_online_simulation(
 
     turns = stats_global.get('turns', 0)
     dist_total_start = stats_global['length']
-    initial_title = (f"Optymalizacja tras BSP z uwzględnieniem stref ryzyka (Risk-Aware A*, W=20)\n"
+    initial_title = (f"Optymalizacja tras BSP z uwzględnieniem stref ryzyka (Risk-Aware A*, W={RISK_WEIGHT:.0f})\n"
                      f"Sumaryczna droga przelotu: {dist_total_start:.1f} m | "
                      f"Czas Lotu: {stats_global.get('flight_time', 0):.1f} s | Ryzyko: {stats_global['risk']:.1f} | Zakręty: {turns}")
     ax.set_title(initial_title, fontsize=14, color='white', pad=25)
@@ -389,7 +424,7 @@ def run_online_simulation(
                            label='Pierwotny Plan')
 
     lc_flown_bg = LineCollection([], colors='#555555', linewidths=7, alpha=0.4, zorder=3)
-    lc_flown = LineCollection([], cmap=get_speed_cmap(), linewidths=5, norm=plt.Normalize(0, 18.0), zorder=4)
+    lc_flown = LineCollection([], cmap=get_speed_cmap(), linewidths=5, norm=plt.Normalize(0, V_MAX_MS), zorder=4)
     ax.add_collection(lc_flown_bg)
     ax.add_collection(lc_flown)
     ax.plot([], [], color='lime', linewidth=5, label='Droga Przebyta', zorder=0)
@@ -398,7 +433,7 @@ def run_online_simulation(
                              zorder=4)
 
     lc_new_bg = LineCollection([], colors='#555555', linewidths=7, alpha=0.4, zorder=4)
-    lc_new = LineCollection([], cmap=get_speed_cmap(), linewidths=5, norm=plt.Normalize(0, 18.0), zorder=5)
+    lc_new = LineCollection([], cmap=get_speed_cmap(), linewidths=5, norm=plt.Normalize(0, V_MAX_MS), zorder=5)
     ax.add_collection(lc_new_bg)
     ax.add_collection(lc_new)
 
@@ -417,7 +452,7 @@ def run_online_simulation(
     plt.setp(legend.get_title(), color='white')
 
     ax_slider = plt.axes([0.15, 0.04, 0.60, 0.04], facecolor='#333333')
-    risk_slider = Slider(ax=ax_slider, label='Waga Ryzyka (W) ', valmin=0.0, valmax=100.0, valinit=20.0, valstep=1.0,
+    risk_slider = Slider(ax=ax_slider, label='Waga Ryzyka (W) ', valmin=0.0, valmax=100.0, valinit=RISK_WEIGHT, valstep=1.0,
                          color='cyan')
     risk_slider.label.set_color('white')
     risk_slider.valtext.set_color('white')
@@ -439,9 +474,10 @@ def run_online_simulation(
         search_start = sim_state["buffer_points"][-1] if sim_state.get("buffer_points") else sim_state["drone_pos"]
 
         path_local, stats = search_func(env, search_start, sim_state["target_pos"], risk_weight=w,
-                                        turn_penalty=20.0, drone_radius=collision_radius,
+                                        turn_penalty=TURN_PENALTY_RISK, drone_radius=collision_radius,
                                         initial_direction=sim_state.get("heading", (0, 0)),
-                                        current_speed=sim_state.get("drone_speed", 0.0))
+                                        current_speed=sim_state.get("drone_speed", 0.0),
+                                        initial_straight_dist=sim_state.get("buffer_dist", 0.0))
 
         if path_local:
             # Doklejamy bufor do nowej trasy
@@ -450,10 +486,23 @@ def run_online_simulation(
             else:
                 full_new_path = path_local
 
-            current_drone_speed = sim_state.get("drone_speed", 0.0)
-            speeds = compute_path_speeds(full_new_path, initial_speed=current_drone_speed)
+            # Wizualizacja startuje z v_react_end (realna prędkość drona)
+            visual_speed = sim_state.get("visual_speed", sim_state.get("drone_speed", 0.0))
+            speeds = compute_path_speeds(full_new_path, initial_speed=visual_speed)
 
-            sx, sy, s_speeds = smooth_path_with_speeds(full_new_path, speeds)
+            # Lead-in dla B-spline: daje kontekst kierunkowy → płynny łuk
+            lead_in = sim_state.get("lead_in_points", [])
+            if lead_in and len(full_new_path) >= 3:
+                n_lead = len(lead_in)
+                lead_speeds = np.full(n_lead, visual_speed)
+                combined_path = lead_in + full_new_path
+                combined_speeds = np.concatenate([lead_speeds, speeds])
+                sx, sy, s_speeds = smooth_path_with_speeds(combined_path, combined_speeds)
+                trim = n_lead * 10
+                sx, sy, s_speeds = sx[trim:], sy[trim:], s_speeds[trim:]
+            else:
+                sx, sy, s_speeds = smooth_path_with_speeds(full_new_path, speeds)
+
             points = np.array([sx, sy]).T.reshape(-1, 1, 2)
             segments = np.concatenate([points[:-1], points[1:]], axis=1)
             segment_speeds = (s_speeds[:-1] + s_speeds[1:]) / 2.0
@@ -520,7 +569,7 @@ def run_online_simulation(
         img.set_data(env.grid.T)
 
         DRONE_RADIUS = collision_radius - 2
-        SENSOR_RANGE = 50.0
+        SENSOR_RANGE = 60.0
         CRASH_DIST = OBSTACLE_RADIUS + collision_radius
 
         is_path_blocked = False
@@ -556,40 +605,12 @@ def run_online_simulation(
         if collision_idx == -1: return
 
         processing_delay = 0.8
-        v_max = 18.0
-        acceleration = 4.0
+        v_max = V_MAX_MS
+        acceleration = ACCELERATION
 
-        path_to_current = path_global[:collision_idx + 1]
-        dist_from_start = calculate_path_length(path_to_current)
-        v_accel = np.sqrt(2 * acceleration * dist_from_start) if dist_from_start > 0 else 0.0
-
-        dist_to_next_turn = 0.0
-        v_turn = v_max
-
-        if collision_idx < len(path_global) - 2:
-            current_dir = (path_global[collision_idx + 1][0] - path_global[collision_idx][0],
-                           path_global[collision_idx + 1][1] - path_global[collision_idx][1])
-            temp_dist = 0.0
-            for i in range(collision_idx + 1, len(path_global) - 1):
-                dx = path_global[i + 1][0] - path_global[i][0]
-                dy = path_global[i + 1][1] - path_global[i][1]
-                next_dir = (dx, dy)
-                temp_dist += np.sqrt(
-                    (path_global[i][0] - path_global[i - 1][0]) ** 2 + (path_global[i][1] - path_global[i - 1][1]) ** 2)
-
-                if current_dir != next_dir:
-                    dist_to_next_turn = temp_dist
-                    dot = current_dir[0] * next_dir[0] + current_dir[1] * next_dir[1]
-                    mag1 = np.sqrt(current_dir[0] ** 2 + current_dir[1] ** 2)
-                    mag2 = np.sqrt(next_dir[0] ** 2 + next_dir[1] ** 2)
-                    if mag1 * mag2 > 0:
-                        cos_theta = max(-1.0, min(1.0, dot / (mag1 * mag2)))
-                        angle = np.arccos(cos_theta)
-                        v_turn = max(1.0, v_max * (1.0 - (angle / np.pi)))
-                    break
-
-        v_brake = np.sqrt(v_turn ** 2 + 2 * acceleration * dist_to_next_turn) if dist_to_next_turn > 0 else v_max
-        v_detect = min(v_max, v_accel, v_brake)
+        # Prędkość drona w momencie wykrycia — z profilu kinematycznego
+        # (uwzględnia zakręty i hamowanie, nie tylko dystans od startu)
+        v_detect = float(global_speeds[collision_idx])
         print(f"\n-> WYKRYTO ZAGROŻENIE! Prędkość początkowa: {v_detect:.1f} m/s")
 
         t_stop = v_detect / acceleration
@@ -624,13 +645,27 @@ def run_online_simulation(
 
         # TWORZENIE DYNAMICZNEGO BUFORA PĘDU
         buffer_points = []
+        buffer_dist = 0.0
         if flight_heading != (0, 0):
-            # Dynamiczne wyliczanie wybiegu na podstawie prędkości na końcu hamowania.
-            # Dzielimy przez np. 4.5, aby skalować:
-            # 18 m/s -> ok. 4 metry wybiegu
-            # 9 m/s  -> ok. 2 metry wybiegu
-            # < 2 m/s -> tylko 1 metr wybiegu (niezbędne minimum do płynnego połączenia B-spline)
-            buffer_steps = max(1, int(round(v_react_end / 4.5)))
+            # Bufor pędu: dron leci prosto tak długo, aż może bezpiecznie skręcić
+            # przy prędkości v_react_end. Dla zakrętu 45° (najpopularniejszy na siatce):
+            #   v_safe_45 = sqrt(MAX_LATERAL_ACCEL * r_45)  gdzie r_45 = 1.5 / sin(22.5°) ≈ 3.91
+            #   v_safe_45 ≈ sqrt(7.0 * 3.91) ≈ 5.23 m/s
+            # Dystans hamowania = (v² - v_safe²) / (2a)
+            import math as _m
+            r_45 = 1.5 / max(0.1, _m.sin(_m.radians(22.5)))
+            v_safe_ref = max(MIN_TURN_SPEED, _m.sqrt(MAX_LATERAL_ACCEL * r_45))
+            v_safe_ref = min(v_safe_ref, V_MAX_MS)
+
+            if v_react_end > v_safe_ref:
+                braking_dist_needed = (v_react_end ** 2 - v_safe_ref ** 2) / (2 * ACCELERATION)
+            else:
+                braking_dist_needed = 0.0
+
+            # Długość jednego kroku zależy od kierunku:
+            # heading=(1,0) → step=1.0, heading=(1,1) → step=√2≈1.414
+            step_len = math.sqrt(flight_heading[0] ** 2 + flight_heading[1] ** 2)
+            buffer_steps = max(1, int(math.ceil(braking_dist_needed / step_len)))
 
             for d in range(1, buffer_steps + 1):
                 bp = (current_drone_pos[0] + flight_heading[0] * d,
@@ -638,14 +673,28 @@ def run_online_simulation(
                 if 0 <= bp[0] < env.width and 0 <= bp[1] < env.height:
                     if env.grid[int(bp[0]), int(bp[1])] < 1.0:
                         buffer_points.append(bp)
+                        buffer_dist += math.sqrt(flight_heading[0]**2 + flight_heading[1]**2)
+                    else:
+                        break  # Trafiliśmy w przeszkodę – bufor się tu kończy
                 else:
                     break
+
+        # Prędkość drona NA KOŃCU bufora (po wyhamowaniu przez odcinek prosto)
+        v_at_buffer_end = math.sqrt(max(0.0, v_react_end ** 2 - 2 * ACCELERATION * buffer_dist))
+        v_at_buffer_end = max(0.0, v_at_buffer_end)
 
         # Zapis do sim_state, żeby `update_route` miało do niego dostęp
         sim_state["drone_pos"] = current_drone_pos
         sim_state["buffer_points"] = buffer_points
         sim_state["heading"] = flight_heading
-        sim_state["drone_speed"] = v_react_end
+        sim_state["drone_speed"] = v_at_buffer_end      # Prędkość NA KOŃCU bufora
+        sim_state["visual_speed"] = v_react_end          # Prędkość NA POCZĄTKU (dla wizualizacji)
+        sim_state["buffer_dist"] = buffer_dist          # Dystans bufora → initial_straight_dist
+
+        # Punkty kontekstowe dla B-spline (kierunek nalotu → płynny łuk)
+        LEAD_IN_COUNT = 5
+        lead_start = max(0, drone_react_idx - LEAD_IN_COUNT)
+        sim_state["lead_in_points"] = list(path_global[lead_start:drone_react_idx])
 
         # STATYSTYKI lotu przed wygenerowaniem nowej trasy
         flown_full = path_global[:drone_react_idx + 1]
@@ -694,9 +743,10 @@ def run_online_simulation(
         sim_state["clicked"] = True
 
         search_start = sim_state["buffer_points"][-1] if sim_state.get("buffer_points") else sim_state["drone_pos"]
-        path_check, _ = search_func(env, search_start, goal, risk_weight=20.0, turn_penalty=20.0,
+        path_check, _ = search_func(env, search_start, goal, risk_weight=RISK_WEIGHT, turn_penalty=TURN_PENALTY_RISK,
                                     drone_radius=collision_radius, initial_direction=flight_heading,
-                                    current_speed=v_react_end)
+                                    current_speed=v_at_buffer_end,
+                                    initial_straight_dist=buffer_dist)
 
         if path_check:
             sim_state["target_pos"] = goal
@@ -733,7 +783,9 @@ def generate_thesis_charts(
         func_astar: Callable,
         func_risk_astar: Callable,
         collision_radius: float,
-        density_label: str = ""
+        density_label: str = "",
+        turn_penalty_classic: float = TURN_PENALTY_CLASSIC,
+        turn_penalty_risk: float = TURN_PENALTY_RISK
 ) -> None:
     print("\n--- GENEROWANIE WYKRESÓW DO PRACY DYPLOMOWEJ ---")
 
@@ -744,29 +796,24 @@ def generate_thesis_charts(
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
-    weights = [0, 20, 40, 60, 80, 100]
+    weights = sorted(set(
+        list(range(0, PARETO_WEIGHT_MAX + 1, PARETO_WEIGHT_STEP)) + [int(RISK_WEIGHT)]
+    ))  # RISK_WEIGHT zawsze w liście nawet jeśli nie jest wielokrotnością kroku
     print(f"Początkowa liczba map do sprawdzenia: {len(envs)}")
 
     # --- KROK 1: Wstępna selekcja map (Fair Benchmarking) ---
-    # Używamy tylko tych map, które są rozwiązywalne dla KAŻDEJ wagi przez WSZYSTKIE algorytmy
+    # Walidacja geometryczna (W=0): czy trasa w ogóle istnieje na mapie?
+    # Sprawdzamy WSZYSTKIE trzy algorytmy - mapa odpada jeśli choćby jeden zawiedzie.
+    # W=0 i turn_penalty=0 to "najłatwiejszy" wariant - jeśli tu nie ma trasy, nie ma jej nigdzie.
     valid_envs = []
     for i, env in enumerate(envs):
-        is_valid = True
-        for w in weights:
-            _, sd = func_dijkstra(env, start, goal, risk_weight=float(w), turn_penalty=20.0,
-                                  drone_radius=collision_radius)
-            _, sa = func_astar(env, start, goal, risk_weight=float(w), turn_penalty=20.0, drone_radius=collision_radius)
-            _, sr = func_risk_astar(env, start, goal, risk_weight=float(w), turn_penalty=20.0,
-                                    drone_radius=collision_radius)
-
-            if not (sd['found'] and sa['found'] and sr['found']):
-                is_valid = False
-                break
-
-        if is_valid:
+        _, sd = func_dijkstra(env, start, goal, risk_weight=0.0, turn_penalty=0.0, drone_radius=collision_radius)
+        _, sa = func_astar(env, start, goal, risk_weight=0.0, turn_penalty=0.0, drone_radius=collision_radius)
+        _, sr = func_risk_astar(env, start, goal, risk_weight=0.0, turn_penalty=0.0, drone_radius=collision_radius)
+        if sd['found'] and sa['found'] and sr['found']:
             valid_envs.append(env)
 
-    print(f"Wyselekcjonowano map użytecznych dla wszystkich wag: {len(valid_envs)}")
+    print(f"Wyselekcjonowano map rozwiazywalnuch przez wszystkie algorytmy: {len(valid_envs)}")
 
     if len(valid_envs) == 0:
         print("BŁĄD: Żadna mapa nie przetrwała filtrowania. Zmniejsz maksymalną wagę W lub wygeneruj łatwiejsze mapy.")
@@ -788,12 +835,18 @@ def generate_thesis_charts(
         sum_a = {k: 0.0 for k in ['len', 'risk', 'time', 'nodes', 'flight', 'turns']}
         sum_r = {k: 0.0 for k in ['len', 'risk', 'time', 'nodes', 'flight', 'turns']}
 
+        # Zmienne na sumy zaawansowane TYLKO dla W=20
+        sum_adv_d = {'smooth': 0, 'max_exp': 0, 'safe_marg': 0}
+        sum_adv_a = {'smooth': 0, 'max_exp': 0, 'safe_marg': 0}
+        sum_adv_r = {'smooth': 0, 'max_exp': 0, 'safe_marg': 0}
+
         for env in valid_envs:
-            _, sd = func_dijkstra(env, start, goal, risk_weight=float(w), turn_penalty=20.0,
-                                  drone_radius=collision_radius)
-            _, sa = func_astar(env, start, goal, risk_weight=float(w), turn_penalty=20.0, drone_radius=collision_radius)
-            _, sr = func_risk_astar(env, start, goal, risk_weight=float(w), turn_penalty=20.0,
+            path_d, sd = func_dijkstra(env, start, goal, risk_weight=float(w), turn_penalty=turn_penalty_classic,
+                                       drone_radius=collision_radius)
+            path_a, sa = func_astar(env, start, goal, risk_weight=float(w), turn_penalty=turn_penalty_classic,
                                     drone_radius=collision_radius)
+            path_r, sr = func_risk_astar(env, start, goal, risk_weight=float(w), turn_penalty=turn_penalty_risk,
+                                         drone_radius=collision_radius)
 
             sum_d['len'] += sd['length'];
             sum_d['risk'] += sd['risk'];
@@ -801,18 +854,36 @@ def generate_thesis_charts(
             sum_d['nodes'] += sd['nodes'];
             sum_d['flight'] += sd.get('flight_time', 0);
             sum_d['turns'] += sd.get('turns', 0)
+
             sum_a['len'] += sa['length'];
             sum_a['risk'] += sa['risk'];
             sum_a['time'] += sa['time'] * 1000;
             sum_a['nodes'] += sa['nodes'];
             sum_a['flight'] += sa.get('flight_time', 0);
             sum_a['turns'] += sa.get('turns', 0)
+
             sum_r['len'] += sr['length'];
             sum_r['risk'] += sr['risk'];
             sum_r['time'] += sr['time'] * 1000;
             sum_r['nodes'] += sr['nodes'];
             sum_r['flight'] += sr.get('flight_time', 0);
             sum_r['turns'] += sr.get('turns', 0)
+
+            # --- NOWOŚĆ: Wyliczanie wskaźników zaawansowanych tylko jeśli badamy W=20 ---
+            if w == 20:
+                sd_sm, sd_me, sd_smarg = calculate_advanced_metrics(path_d, env)
+                sa_sm, sa_me, sa_smarg = calculate_advanced_metrics(path_a, env)
+                sr_sm, sr_me, sr_smarg = calculate_advanced_metrics(path_r, env)
+
+                sum_adv_d['smooth'] += sd_sm;
+                sum_adv_d['max_exp'] += sd_me;
+                sum_adv_d['safe_marg'] += sd_smarg
+                sum_adv_a['smooth'] += sa_sm;
+                sum_adv_a['max_exp'] += sa_me;
+                sum_adv_a['safe_marg'] += sa_smarg
+                sum_adv_r['smooth'] += sr_sm;
+                sum_adv_r['max_exp'] += sr_me;
+                sum_adv_r['safe_marg'] += sr_smarg
 
         # Zapisywanie do krzywych
         if f_count > 0:
@@ -851,15 +922,65 @@ def generate_thesis_charts(
                 'r_fl': sum_r['flight'] / f_count, 'r_trn': sum_r['turns'] / f_count,
             }
 
-        # SPRAWIEDLIWE POBRANIE DANYCH DLA W=20
+        # SPRAWIEDLIWE POBRANIE DANYCH DLA W=20 (Rozbudowane o zaawansowane)
         if w == 20 and f_count > 0:
             bench_20 = {
-                'd_len': sum_d['len'] / f_count, 'd_risk': sum_d['risk'] / f_count,
-                'd_fl': sum_d['flight'] / f_count, 'd_trn': sum_d['turns'] / f_count,
-                'a_len': sum_a['len'] / f_count, 'a_risk': sum_a['risk'] / f_count,
-                'a_fl': sum_a['flight'] / f_count, 'a_trn': sum_a['turns'] / f_count,
-                'r_len': sum_r['len'] / f_count, 'r_risk': sum_r['risk'] / f_count,
-                'r_fl': sum_r['flight'] / f_count, 'r_trn': sum_r['turns'] / f_count,
+                # Stare, podstawowe wartości...
+                'd_len': sum_d['len'] / f_count, 'd_risk': sum_d['risk'] / f_count, 'd_fl': sum_d['flight'] / f_count,
+                'd_trn': sum_d['turns'] / f_count,
+                'a_len': sum_a['len'] / f_count, 'a_risk': sum_a['risk'] / f_count, 'a_fl': sum_a['flight'] / f_count,
+                'a_trn': sum_a['turns'] / f_count,
+                'r_len': sum_r['len'] / f_count, 'r_risk': sum_r['risk'] / f_count, 'r_fl': sum_r['flight'] / f_count,
+                'r_trn': sum_r['turns'] / f_count,
+
+                # Nowe, zaawansowane wartości zadeklarowane promotorowi
+                'd_smooth': sum_adv_d['smooth'] / f_count, 'd_max_exp': sum_adv_d['max_exp'] / f_count,
+                'd_safe_marg': sum_adv_d['safe_marg'] / f_count,
+                'a_smooth': sum_adv_a['smooth'] / f_count, 'a_max_exp': sum_adv_a['max_exp'] / f_count,
+                'a_safe_marg': sum_adv_a['safe_marg'] / f_count,
+                'r_smooth': sum_adv_r['smooth'] / f_count, 'r_max_exp': sum_adv_r['max_exp'] / f_count,
+                'r_safe_marg': sum_adv_r['safe_marg'] / f_count
+            }
+            for env in valid_envs:
+                # Ponowne wywołanie, żeby mieć dostęp do 'path' (lub możesz to wyciągnąć z poprzedniej pętli)
+                path_d, _ = func_dijkstra(env, start, goal, risk_weight=RISK_WEIGHT, turn_penalty=turn_penalty_classic,
+                                          drone_radius=collision_radius)
+                path_a, _ = func_astar(env, start, goal, risk_weight=RISK_WEIGHT, turn_penalty=turn_penalty_classic,
+                                       drone_radius=collision_radius)
+                path_r, _ = func_risk_astar(env, start, goal, risk_weight=RISK_WEIGHT, turn_penalty=turn_penalty_risk,
+                                            drone_radius=collision_radius)
+
+                sd_sm, sd_me, sd_smarg = calculate_advanced_metrics(path_d, env)
+                sa_sm, sa_me, sa_smarg = calculate_advanced_metrics(path_a, env)
+                sr_sm, sr_me, sr_smarg = calculate_advanced_metrics(path_r, env)
+
+                sum_adv_d['smooth'] += sd_sm;
+                sum_adv_d['max_exp'] += sd_me;
+                sum_adv_d['safe_marg'] += sd_smarg
+                sum_adv_a['smooth'] += sa_sm;
+                sum_adv_a['max_exp'] += sa_me;
+                sum_adv_a['safe_marg'] += sa_smarg
+                sum_adv_r['smooth'] += sr_sm;
+                sum_adv_r['max_exp'] += sr_me;
+                sum_adv_r['safe_marg'] += sr_smarg
+
+            # Rozbudowany słownik bench_20
+            bench_20 = {
+                # Stare, podstawowe wartości...
+                'd_len': sum_d['len'] / f_count, 'd_risk': sum_d['risk'] / f_count, 'd_fl': sum_d['flight'] / f_count,
+                'd_trn': sum_d['turns'] / f_count,
+                'a_len': sum_a['len'] / f_count, 'a_risk': sum_a['risk'] / f_count, 'a_fl': sum_a['flight'] / f_count,
+                'a_trn': sum_a['turns'] / f_count,
+                'r_len': sum_r['len'] / f_count, 'r_risk': sum_r['risk'] / f_count, 'r_fl': sum_r['flight'] / f_count,
+                'r_trn': sum_r['turns'] / f_count,
+
+                # Nowe, zaawansowane wartości zadeklarowane promotorowi
+                'd_smooth': sum_adv_d['smooth'] / f_count, 'd_max_exp': sum_adv_d['max_exp'] / f_count,
+                'd_safe_marg': sum_adv_d['safe_marg'] / f_count,
+                'a_smooth': sum_adv_a['smooth'] / f_count, 'a_max_exp': sum_adv_a['max_exp'] / f_count,
+                'a_safe_marg': sum_adv_a['safe_marg'] / f_count,
+                'r_smooth': sum_adv_r['smooth'] / f_count, 'r_max_exp': sum_adv_r['max_exp'] / f_count,
+                'r_safe_marg': sum_adv_r['safe_marg'] / f_count
             }
 
     plt.style.use('default')
@@ -930,5 +1051,89 @@ def generate_thesis_charts(
             filename=os.path.join(output_dir, "4_algorithm_comparison_benchmark_W20.png"),
             w_label="Waga Ryzyka W=20"
         )
+    if bench_20:
+        fig_adv, axs_adv = plt.subplots(1, 3, figsize=(18, 6))
+
+        labels_alg = ["Dijkstra", "A* Standard", "Risk-Aware A*"]
+        colors_alg = ['#4472C4', '#ED7D31', '#70AD47']
+
+        # 1. Indeks Płynności Trajektorii (Suma zmian kątów) -> IM MNIEJ TYM LEPIEJ
+        vals_smooth = [bench_20['d_smooth'], bench_20['a_smooth'], bench_20['r_smooth']]
+        axs_adv[0].bar(labels_alg, vals_smooth, color=colors_alg, edgecolor='black')
+        axs_adv[0].set_title("Indeks Płynności Trajektorii\n(Suma zmian kątów [°])", fontsize=13, fontweight='bold')
+        axs_adv[0].set_ylabel("Stopnie [°] (\u2193 Lepiej)")
+        for i, v in enumerate(vals_smooth):
+            axs_adv[0].text(i, v + (max(vals_smooth) * 0.02), f"{v:.1f}°", ha='center', fontweight='bold')
+
+        # 2. Wskaźnik Ekspozycji Maksymalnej -> IM MNIEJ TYM LEPIEJ
+        vals_max_exp = [bench_20['d_max_exp'], bench_20['a_max_exp'], bench_20['r_max_exp']]
+        axs_adv[1].bar(labels_alg, vals_max_exp, color=colors_alg, edgecolor='black')
+        axs_adv[1].set_title("Wskaźnik Ekspozycji Maksymalnej\n(Najwyższe punktowe ryzyko)", fontsize=13,
+                             fontweight='bold')
+        axs_adv[1].set_ylabel("Wartość Ryzyka (\u2193 Lepiej)")
+        for i, v in enumerate(vals_max_exp):
+            axs_adv[1].text(i, v + (max(vals_max_exp) * 0.02), f"{v:.2f}", ha='center', fontweight='bold')
+
+        # 3. Średni Margines Bezpieczeństwa -> IM WIĘCEJ TYM LEPIEJ
+        vals_safe_marg = [bench_20['d_safe_marg'], bench_20['a_safe_marg'], bench_20['r_safe_marg']]
+        axs_adv[2].bar(labels_alg, vals_safe_marg, color=colors_alg, edgecolor='black')
+        axs_adv[2].set_title("Średni Margines Bezpieczeństwa\n(Dystans/Strefa buforowa od przeszkód)", fontsize=13,
+                             fontweight='bold')
+        axs_adv[2].set_ylabel("Punkty Bezpieczeństwa 0-100 (\u2191 Lepiej)")
+        for i, v in enumerate(vals_safe_marg):
+            axs_adv[2].text(i, v + (max(vals_safe_marg) * 0.02), f"{v:.1f}", ha='center', fontweight='bold')
+
+        # Estetyka dla wszystkich 3 podwykresów
+        for ax in axs_adv:
+            ax.grid(axis='y', linestyle='--', alpha=0.7)
+            # Najpierw twardo definiujemy pozycje (0, 1, 2), a potem przypisujemy im etykiety
+            ax.set_xticks(range(len(labels_alg)))
+            ax.set_xticklabels(labels_alg, fontsize=11)
+
+        fig_adv.suptitle("Szczegółowa Analiza Zaawansowanych Wskaźników Jakości Trajektorii (W=20)", fontsize=16,
+                         fontweight='bold')
+        plt.tight_layout()
+        fig_adv.subplots_adjust(top=0.85)  # Robi miejsce na główny tytuł
+
+        # Zapisz wykres
+        fig_adv.savefig(os.path.join(output_dir, "5_advanced_metrics_W20.png"), dpi=300, bbox_inches='tight')
+        plt.close(fig_adv)
 
     print("Gotowe! Wykresy zapisano w:", output_dir)
+
+def calculate_advanced_metrics(path, env):
+    """
+    Oblicza 3 zaawansowane wskaźniki obiecane w tezie pracy dyplomowej.
+    """
+    if not path or len(path) < 2:
+        return 0.0, 0.0, 0.0
+
+    # 1. Indeks Płynności Trajektorii (Suma zmian kątów kursu w stopniach)
+    # Im mniej, tym bardziej "lotnicza" i płynna trasa
+    smoothness_index = 0.0
+    if len(path) > 2:
+        for i in range(1, len(path) - 1):
+            v1 = (path[i][0] - path[i - 1][0], path[i][1] - path[i - 1][1])
+            v2 = (path[i + 1][0] - path[i][0], path[i + 1][1] - path[i][1])
+            mag1 = math.hypot(*v1)
+            mag2 = math.hypot(*v2)
+            if mag1 * mag2 > 0:
+                dot = v1[0] * v2[0] + v1[1] * v2[1]
+                cos_theta = max(-1.0, min(1.0, dot / (mag1 * mag2)))
+                angle_deg = math.degrees(math.acos(cos_theta))
+                smoothness_index += angle_deg
+
+    # 2. Wskaźnik Ekspozycji Maksymalnej (Najwyższe punktowe ryzyko na trasie)
+    # Sprawdzamy, w jak najgorsze miejsce wleciał algorytm (pik zagrożenia)
+    max_exposure = max([env.grid[int(p[0]), int(p[1])] for p in path])
+
+    # 3. Średni Margines Bezpieczeństwa (Przybliżony dystans od przeszkód)
+    # Ponieważ grid mapy zawiera wartości >0 wokół przeszkód,
+    # symulujemy margines jako "przestrzeń wolną od ryzyka".
+    # Jeśli grid ma max 1.0 (budynek), margines to (1.0 - ryzyko_komórki)
+    # Wynik podajemy w umownych punktach bezpieczeństwa (0-100)
+    risk_values = [env.grid[int(p[0]), int(p[1])] for p in path]
+    avg_risk = sum(risk_values) / len(risk_values)
+    safety_margin = max(0.0, (1.0 - avg_risk) * 100.0)
+
+    return smoothness_index, max_exposure, safety_margin

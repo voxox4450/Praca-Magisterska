@@ -1,11 +1,14 @@
 from typing import List, Tuple, Dict, Any
 from environment.grid_map import GridMap
-from algorithms.common import base_search  # lub import z miejsca, gdzie ją umieścisz
+from algorithms.common import base_search
+from config import RISK_WEIGHT, TURN_PENALTY_CLASSIC, COLLISION_RADIUS
 
 
 def run_dijkstra(
         grid_map: GridMap, start: Tuple[int, int], goal: Tuple[int, int],
-        risk_weight: float = 20.0, turn_penalty: float = 2.0, drone_radius: float = 3.0,
+        risk_weight: float = RISK_WEIGHT,
+        turn_penalty: float = TURN_PENALTY_CLASSIC,
+        drone_radius: float = COLLISION_RADIUS,
         initial_direction: Tuple[int, int] = (0, 0), current_speed: float = 0.0
 ) -> Tuple[List[Tuple[int, int]], Dict[str, Any]]:
     return base_search(

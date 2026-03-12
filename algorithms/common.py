@@ -1,17 +1,27 @@
 from typing import Tuple, List, Optional, Callable, Dict, Any
 import math
+import heapq
+import time
 from environment.grid_map import GridMap
+from config import (
+    V_MAX_MS, ACCELERATION, MAX_LATERAL_ACCEL, MIN_TURN_SPEED,
+    DRONE_MASS_KG, MAX_THRUST_NET_N,
+    HEURISTIC_MULT_ASTAR, HEURISTIC_MULT_RISK,
+    RISK_WEIGHT, TURN_PENALTY_CLASSIC, TURN_PENALTY_RISK, COLLISION_RADIUS
+)
 
 
 class Node:
     def __init__(self, x: int, y: int, cost: float, parent: Optional['Node'] = None,
-                 direction: Tuple[int, int] = (0, 0), heuristic: float = 0.0) -> None:
+                 direction: Tuple[int, int] = (0, 0), heuristic: float = 0.0,
+                 speed: float = 0.0) -> None:
         self.x = x
         self.y = y
         self.cost = cost
         self.parent = parent
         self.direction = direction
         self.heuristic = heuristic
+        self.speed = speed          # Prędkość drona w tym węźle [m/s]
 
     @property
     def total_cost(self) -> float:
@@ -56,8 +66,10 @@ def reconstruct_path(node: Node, grid_map: GridMap) -> Tuple[List[Tuple[int, int
 def calculate_segment_risk(path: List[Tuple[int, int]], env: GridMap) -> float:
     """Oblicza całkowite ryzyko na ścieżce."""
     total_risk = 0.0
-    for (x, y) in path:
-        total_risk += env.get_cost(x, y)
+    for p in path:
+        val = env.grid[int(p[0]), int(p[1])]
+        if val < 1.0:
+            total_risk += val
     return total_risk
 
 
@@ -79,13 +91,20 @@ def generate_analysis_table(
         base_len: float,
         base_risk: float,
         collision_radius: float,
-        table_title: str = "ANALIZA"
+        table_title: str = "ANALIZA",
+        turn_penalty: float = TURN_PENALTY_CLASSIC   # przekaż TURN_PENALTY_RISK dla Risk A*
 ) -> None:
     """
     Wspólna funkcja do generowania tabeli analizy dla różnych wag ryzyka.
-    Używana zarówno w trybie offline jak i online.
+    Zakres wag pochodzi z config (PARETO_WEIGHT_MAX, PARETO_WEIGHT_STEP).
+    Parametr turn_penalty powinien odpowiadać typowi algorytmu:
+      - TURN_PENALTY_CLASSIC dla Dijkstry / A* Standard
+      - TURN_PENALTY_RISK    dla Risk-Aware A*
     """
-    risk_weights = [float(x) for x in range(0, 51, 5)]
+    from config import PARETO_WEIGHT_MAX, PARETO_WEIGHT_STEP, RISK_WEIGHT
+    risk_weights = sorted(set(
+        [float(x) for x in range(0, PARETO_WEIGHT_MAX + 1, PARETO_WEIGHT_STEP)] + [RISK_WEIGHT]
+    ))
 
     print("-" * 90)
     print(f"{table_title}")
@@ -96,7 +115,8 @@ def generate_analysis_table(
     print("-" * 90)
 
     for w in risk_weights:
-        _, stats = search_func(env, start_pos, target_pos, risk_weight=w, turn_penalty=20.0, drone_radius=collision_radius)
+        _, stats = search_func(env, start_pos, target_pos, risk_weight=w, turn_penalty=turn_penalty,
+                               drone_radius=collision_radius)
 
         if stats['found'] and base_len > 0:
             len_inc = ((stats['length'] - base_len) / base_len) * 100
@@ -112,24 +132,29 @@ def generate_analysis_table(
 
     print("-" * 90)
 
-def calculate_kinematic_flight_time(path: List[Tuple[int, int]],
-                                    mass: float = 30.0,
-                                    max_thrust_net: float = 120.0,
-                                    v_max_kmh: float = 65.0) -> float:
+
+def calculate_kinematic_flight_time(
+        path: List[Tuple[int, int]],
+        mass: float = DRONE_MASS_KG,
+        max_thrust_net: float = MAX_THRUST_NET_N,
+        v_max: float = V_MAX_MS          # [m/s] – już nie km/h!
+) -> float:
     """
     Model kinematyczny BSP: Oblicza realistyczny czas przelotu trasy.
     Uwzględnia masę, przyspieszenie, V_max oraz konieczność hamowania przed zakrętami.
+
+    Parametry domyślne pobierane z config.py – nie trzeba podawać ręcznie.
+    v_max podawane w [m/s] (nie km/h).
     """
     if len(path) < 2:
         return 0.0
 
-    # 1. Konwersja jednostek i parametry fizyczne
-    v_max = v_max_kmh / 3.6  # 65 km/h -> ~18.05 m/s
-    a = max_thrust_net / mass  # np. 120N / 30kg = 4.0 m/s^2
+    # Przyspieszenie z parametrów fizycznych
+    a = max_thrust_net / mass          # np. 120 N / 30 kg = 4.0 m/s²
 
-    # 2. Wyodrębnienie prostych odcinków (zamiast analizować siatkę kratka po kratce)
-    segments = []  # Długości prostych odcinków w metrach
-    turn_angles = []  # Kąty między odcinkami w radianach
+    # Wyodrębnienie prostych odcinków i kątów zakrętów
+    segments: List[float] = []
+    turn_angles: List[float] = []
 
     current_len = 0.0
     last_dir = None
@@ -141,7 +166,6 @@ def calculate_kinematic_flight_time(path: List[Tuple[int, int]],
         curr_dir = (dx, dy)
 
         if last_dir is not None and curr_dir != last_dir:
-            # Obliczenie kąta zakrętu (Iloczyn skalarny)
             dot = last_dir[0] * curr_dir[0] + last_dir[1] * curr_dir[1]
             mag1 = math.sqrt(last_dir[0] ** 2 + last_dir[1] ** 2)
             mag2 = math.sqrt(curr_dir[0] ** 2 + curr_dir[1] ** 2)
@@ -158,45 +182,38 @@ def calculate_kinematic_flight_time(path: List[Tuple[int, int]],
 
     segments.append(current_len)
 
-    # 3. Modelowanie Prędkości w węzłach (zakrętach)
-    # Dron musi zwolnić na zakręcie proporcjonalnie do jego ostrości
+    # Prędkości w węzłach zakrętów — spójna fizyka z planistą
     turn_velocities = []
-    # Maksymalne przyspieszenie boczne (dośrodkowe), jakie dron może wytrzymać
-    # 7.0 m/s^2 to ok. 0.7g - bezpieczna wartość dla ciężkiego drona 30kg
-    max_lat_a = 7.0
-
     for angle in turn_angles:
-        # 1. Stary model (rzut wektora)
-        v_vector = v_max * max(0.0, math.cos(angle))
-
-        # 2. Model siły odśrodkowej
-        # Przyjmujemy przybliżony promień skrętu r.
-        # Na gridzie zakręt o kąt 'angle' przy 1m kratkach
-        # wymusza rzędu r = 1.5 / sin(angle/2)
         r_approx = 1.5 / max(0.1, math.sin(angle / 2))
-        v_centripetal = math.sqrt(max_lat_a * r_approx)
+        v_centripetal = math.sqrt(MAX_LATERAL_ACCEL * r_approx)
 
-        # Prędkość na zakręcie to minimum z obu modeli
-        v_turn = min(v_vector, v_centripetal)
+        v_turn = min(v_centripetal, v_max)
+        turn_velocities.append(max(MIN_TURN_SPEED, v_turn))
 
-        turn_velocities.append(max(0.5, v_turn))
-
-    # Prędkość początkowa (V_0) = 0 i końcowa (V_k) = 0
+    # Prędkości w węzłach (start i koniec = 0)
     node_velocities = [0.0] + turn_velocities + [0.0]
 
     total_time = 0.0
 
-    # 4. Obliczenia kinematyczne dla każdego odcinka z wykorzystaniem profilu trapezowego
     for i, L in enumerate(segments):
         v_start = node_velocities[i]
         v_end = node_velocities[i + 1]
 
-        # Max prędkość możliwa do osiągnięcia z uwzględnieniem przyspieszania i hamowania
-        # Wynika ze wzoru kinematycznego na dystans przy stałym przyspieszeniu
-        v_reach = math.sqrt(max(0, a * L + (v_start ** 2 + v_end ** 2) / 2.0))
+        min_breaking_dist = abs(v_start ** 2 - v_end ** 2) / (2 * a)
+        if min_breaking_dist > L:
+            # Fizycznie niemożliwe wyhamowanie (błąd siatki/zbyt ostre zakręty).
+            # Doliczamy karny czas jako "awaryjne zatrzymanie"
+            total_time += (L / max(0.1, (v_start + v_end) / 2)) + 2.0
+            continue
+
+        # Szczytowa prędkość osiągalna na odcinku z kinematyki (trójkąt)
+        # 2aL = v_reach^2 - v_start^2 + v_reach^2 - v_end^2
+        v_reach_squared = a * L + (v_start ** 2 + v_end ** 2) / 2.0
+        v_reach = math.sqrt(v_reach_squared)
 
         if v_reach >= v_max:
-            # Dron osiąga V_max (profil trapezowy)
+            # Profil trapezowy (osiąga V_max)
             t_acc = (v_max - v_start) / a
             t_dec = (v_max - v_end) / a
             d_acc = (v_max ** 2 - v_start ** 2) / (2 * a)
@@ -205,7 +222,7 @@ def calculate_kinematic_flight_time(path: List[Tuple[int, int]],
             t_cruise = d_cruise / v_max
             total_time += (t_acc + t_cruise + t_dec)
         else:
-            # Dron nie ma miejsca na osiągnięcie V_max (profil trójkątny)
+            # Profil trójkątny (nie osiąga V_max)
             t_acc = abs(v_reach - v_start) / a
             t_dec = abs(v_reach - v_end) / a
             total_time += (t_acc + t_dec)
@@ -213,40 +230,31 @@ def calculate_kinematic_flight_time(path: List[Tuple[int, int]],
     return total_time
 
 
-import heapq
-import time
-import math
-from typing import List, Tuple, Dict, Any
-from environment.grid_map import GridMap
-from algorithms.common import Node, reconstruct_path, calculate_kinematic_flight_time
-
-
 def base_search(
         grid_map: GridMap,
         start: Tuple[int, int],
         goal: Tuple[int, int],
-        risk_weight: float = 20.0,
-        turn_penalty: float = 2.0,
-        drone_radius: float = 3.0,
+        risk_weight: float = RISK_WEIGHT,
+        turn_penalty: float = TURN_PENALTY_CLASSIC,
+        drone_radius: float = COLLISION_RADIUS,
         initial_direction: Tuple[int, int] = (0, 0),
         current_speed: float = 0.0,
         use_heuristic: bool = True,
-        use_kinematics: bool = False
+        use_kinematics: bool = False,
+        initial_straight_dist: float = 0.0
 ) -> Tuple[List[Tuple[int, int]], Dict[str, Any]]:
     t0 = time.time()
-    start_node = Node(start[0], start[1], 0.0, direction=initial_direction)
+    start_node = Node(start[0], start[1], 0.0, direction=initial_direction, speed=current_speed)
 
-    # Inicjalizacja parametrów fizycznych dla Risk A*
     if use_kinematics:
-        start_node.straight_dist = 0.0
+        start_node.straight_dist = initial_straight_dist   # Dystans przeleciony prosto PRZED węzłem startu
         start_node.straight_steps = 100
 
     open_list = []
     heapq.heappush(open_list, start_node)
 
-    # Przestrzeń stanów zależna od algorytmu
     if use_kinematics:
-        g_score = {(start[0], start[1], initial_direction[0], initial_direction[1]): 0.0}
+        g_score = {(start[0], start[1], initial_direction[0], initial_direction[1],0): 0.0}
     else:
         g_score = {(start[0], start[1]): 0.0}
 
@@ -257,11 +265,10 @@ def base_search(
         current = heapq.heappop(open_list)
         nodes_expanded += 1
 
-        # Cel osiągnięty
         if (current.x, current.y) == goal:
             execution_time = time.time() - t0
             path, length, total_risk, turns = reconstruct_path(current, grid_map)
-            flight_time = calculate_kinematic_flight_time(path, mass=30.0, max_thrust_net=120.0, v_max_kmh=65.0)
+            flight_time = calculate_kinematic_flight_time(path)   # parametry z config
 
             return path, {
                 "found": True, "time": execution_time, "length": length,
@@ -269,8 +276,7 @@ def base_search(
                 "flight_time": flight_time
             }
 
-        # Weryfikacja odwiedzonych węzłów
-        state_key = (current.x, current.y, current.direction[0], current.direction[1]) if use_kinematics else (
+        state_key = (current.x, current.y, current.direction[0], current.direction[1], getattr(current, 'straight_steps', 0)) if use_kinematics else (
             current.x, current.y)
         if state_key in visited:
             continue
@@ -290,18 +296,18 @@ def base_search(
             v1 = current.direction
             v2 = (dx, dy)
 
-            # Zmienne kinematyczne
             new_straight_steps = 0
             straight_dist = getattr(current, 'straight_dist', 0.0)
 
-            # ----- MODEL ZAAWANSOWANY (Risk A*) -----
+            # ── MODEL ZAAWANSOWANY (Risk A*) ───────────────────────────────
             if use_kinematics:
-                acceleration = 4.0
-                v_max = 18.0
-                node_speed = math.sqrt(current_speed ** 2 + 2 * acceleration * straight_dist)
-                node_speed = min(v_max, node_speed)
+                # Prędkość śledzona per-węzeł (nie liczona od nowa ze wzoru)
+                node_speed = current.speed
                 straight_steps = getattr(current, 'straight_steps', 100)
                 new_straight_steps = straight_steps + 1
+
+                # Domyślnie: lot na wprost – przyspieszenie do V_max
+                new_speed = min(V_MAX_MS, math.sqrt(node_speed ** 2 + 2 * ACCELERATION * dist_cost))
 
                 if v1 != (0, 0) and v1 != v2:
                     dot_product = v1[0] * v2[0] + v1[1] * v2[1]
@@ -309,21 +315,34 @@ def base_search(
                     mag2 = math.sqrt(v2[0] ** 2 + v2[1] ** 2)
                     cos_theta = max(-1.0, min(1.0, dot_product / (mag1 * mag2)))
                     angle = math.acos(cos_theta)
-                    angle_deg = math.degrees(angle)
 
-                    if node_speed > 5.0:
-                        max_allowed_angle = 45.0
-                    else:
-                        speed_factor = node_speed / 5.0
-                        max_allowed_angle = 180.0 - (speed_factor * 135.0)
-
-                    if angle_deg > (max_allowed_angle + 1.0) or straight_steps < int(node_speed / 3.0):
+                    # ── HARD LIMIT: zawrócenie w locie (~180°) – fizycznie niemożliwe ──
+                    if angle >= math.radians(170):
                         continue
 
-                    new_straight_steps = 0
-                    turn_cost = turn_penalty * (angle / (math.pi / 2))
+                    # Prędkość bezpieczna dla tego zakrętu (fizyka dośrodkowa)
+                    r_turn = 1.5 / max(0.1, math.sin(angle / 2))
+                    v_safe_turn = max(MIN_TURN_SPEED, math.sqrt(MAX_LATERAL_ACCEL * r_turn))
+                    v_safe_turn = min(v_safe_turn, V_MAX_MS)
 
-            # ----- MODEL KLASYCZNY (Dijkstra / A*) -----
+                    braking_penalty = 0.0
+                    if node_speed > v_safe_turn:
+                        # ── TWARDY LIMIT FIZYCZNY: droga hamowania ────────────────────
+                        # Dron musi móc wyhamować PRZED węzłem zakrętu.
+                        # Jeśli odcinek prosty jest za krótki – ruch odrzucamy (continue).
+                        # To zmusza planera do planowania szerszych łuków.
+                        braking_dist_needed = (node_speed ** 2 - v_safe_turn ** 2) / (2 * ACCELERATION)
+                        if braking_dist_needed > straight_dist:
+                            continue  # Fizycznie niemożliwe – odrzuć tę krawędź
+
+                        braking_penalty = (node_speed - v_safe_turn) / ACCELERATION
+
+                    # Po zakręcie dron leci z prędkością bezpieczną (wyhamował)
+                    new_speed = v_safe_turn
+                    new_straight_steps = 0
+                    turn_cost = turn_penalty * (angle / (math.pi / 2)) + braking_penalty
+
+            # ── MODEL KLASYCZNY (Dijkstra / A* Standard) ───────────────────
             else:
                 if current.parent is not None:
                     if v1 != (0, 0) and v1 != v2:
@@ -337,11 +356,12 @@ def base_search(
 
                 h = 0.0
                 if use_heuristic:
-                    # Różne mnożniki heurystyki (tie-breakery) wg Twojego kodu
-                    multiplier = min(2.5, 1.0 + (risk_weight * 0.05)) if use_kinematics else 1.001
+                    # Stałe mnożniki z config – uczciwe porównanie między algorytmami
+                    multiplier = HEURISTIC_MULT_RISK if use_kinematics else HEURISTIC_MULT_ASTAR
                     h = math.sqrt((nx - goal[0]) ** 2 + (ny - goal[1]) ** 2) * multiplier
 
-                neighbor = Node(nx, ny, new_g, current, direction=(dx, dy), heuristic=h)
+                neighbor = Node(nx, ny, new_g, current, direction=(dx, dy), heuristic=h,
+                               speed=new_speed if use_kinematics else 0.0)
 
                 if use_kinematics:
                     neighbor.straight_dist = dist_cost if turn_cost > 0.0 else straight_dist + dist_cost
