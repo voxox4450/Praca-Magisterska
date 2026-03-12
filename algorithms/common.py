@@ -7,7 +7,8 @@ from config import (
     V_MAX_MS, ACCELERATION, MAX_LATERAL_ACCEL, MIN_TURN_SPEED,
     DRONE_MASS_KG, MAX_THRUST_NET_N,
     HEURISTIC_MULT_ASTAR, HEURISTIC_MULT_RISK,
-    RISK_WEIGHT, TURN_PENALTY_CLASSIC, TURN_PENALTY_RISK, COLLISION_RADIUS
+    RISK_WEIGHT, TURN_PENALTY, COLLISION_RADIUS,
+    TURN_RADIUS_CONST
 )
 
 
@@ -29,7 +30,7 @@ class Node:
         self.parent = parent
         self.direction = direction
         self.heuristic = heuristic
-        self.speed = speed          # Prędkość drona w tym węźle [m/s]
+        self.speed = speed
 
     @property
     def total_cost(self) -> float:
@@ -71,8 +72,12 @@ def reconstruct_path(node: Node, grid_map: GridMap) -> Tuple[List[Tuple[int, int
     return path[::-1], total_length, total_risk, turns
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# [FIX #21] Wspólna funkcja ryzyka — sumuje WSZYSTKIE komórki (bez [:-1])
+# Używana spójnie przez offline i online.
+# ─────────────────────────────────────────────────────────────────────────────
 def calculate_segment_risk(path: List[Tuple[int, int]], env: GridMap) -> float:
-    """Oblicza całkowite ryzyko na ścieżce."""
+    """Oblicza całkowite ryzyko na ścieżce (suma wartości grid dla każdej komórki)."""
     total_risk = 0.0
     for p in path:
         val = env.grid[int(p[0]), int(p[1])]
@@ -82,13 +87,54 @@ def calculate_segment_risk(path: List[Tuple[int, int]], env: GridMap) -> float:
 
 
 def calculate_path_length(path: List[Tuple[int, int]]) -> float:
-    """Oblicza długość ścieżki."""
+    """Oblicza długość ścieżki [kratki = metry przy CELL_SIZE_M=1]."""
     length = 0.0
     for i in range(1, len(path)):
         p1 = path[i - 1]
         p2 = path[i]
         length += math.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
     return length
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [FIX #2] Wspólna funkcja kary za zakręt (proporcjonalna do kąta).
+# Używana przez WSZYSTKIE algorytmy.
+# ─────────────────────────────────────────────────────────────────────────────
+def compute_turn_cost(v1: Tuple[int, int], v2: Tuple[int, int],
+                      turn_penalty: float) -> Tuple[float, float]:
+    """
+    Koszt zakrętu proporcjonalny do kąta: turn_cost = penalty × (angle / (π/2)).
+    Zwraca (turn_cost, angle_rad). Brak zmiany kierunku → (0, 0).
+    """
+    if v1 == (0, 0) or v1 == v2:
+        return 0.0, 0.0
+
+    dot_product = v1[0] * v2[0] + v1[1] * v2[1]
+    mag1 = math.sqrt(v1[0] ** 2 + v1[1] ** 2)
+    mag2 = math.sqrt(v2[0] ** 2 + v2[1] ** 2)
+    cos_theta = max(-1.0, min(1.0, dot_product / (mag1 * mag2)))
+    angle = math.acos(cos_theta)
+
+    cost = turn_penalty * (angle / (math.pi / 2))
+    return cost, angle
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# [FIX #18] Wspólna funkcja promienia zakrętu (z udokumentowaną stałą)
+# ─────────────────────────────────────────────────────────────────────────────
+def compute_turn_radius(angle: float) -> float:
+    """
+    Przybliżony promień zakrętu na siatce: r = TURN_RADIUS_CONST / sin(angle/2).
+    Uzasadnienie stałej — patrz komentarz w config.py (TURN_RADIUS_CONST).
+    """
+    return TURN_RADIUS_CONST / max(0.1, math.sin(angle / 2))
+
+
+def compute_safe_turn_speed(angle: float) -> float:
+    """Bezpieczna prędkość w zakręcie z fizyki dośrodkowej: v = √(a_lat · r)."""
+    r = compute_turn_radius(angle)
+    v = math.sqrt(MAX_LATERAL_ACCEL * r)
+    return max(MIN_TURN_SPEED, min(v, V_MAX_MS))
 
 
 def generate_analysis_table(
@@ -100,7 +146,7 @@ def generate_analysis_table(
         base_risk: float,
         collision_radius: float,
         table_title: str = "ANALIZA",
-        turn_penalty: float = TURN_PENALTY_CLASSIC
+        turn_penalty: float = TURN_PENALTY
 ) -> None:
     from config import PARETO_WEIGHT_MAX, PARETO_WEIGHT_STEP, RISK_WEIGHT
     risk_weights = sorted(set(
@@ -132,6 +178,10 @@ def generate_analysis_table(
     print("-" * 90)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# [FIX #9, #19] Czas lotu z forward-backward pass na prędkościach węzłów.
+# Eliminuje magiczną karę +2.0s i gwarantuje fizyczną spójność.
+# ─────────────────────────────────────────────────────────────────────────────
 def calculate_kinematic_flight_time(
         path: List[Tuple[int, int]],
         mass: float = DRONE_MASS_KG,
@@ -172,50 +222,71 @@ def calculate_kinematic_flight_time(
 
     segments.append(current_len)
 
+    # Prędkości w węzłach (zakrętach): fizyka dośrodkowa
     turn_velocities = []
     for angle in turn_angles:
-        r_approx = 1.5 / max(0.1, math.sin(angle / 2))
-        v_centripetal = math.sqrt(MAX_LATERAL_ACCEL * r_approx)
-        v_turn = min(v_centripetal, v_max)
-        turn_velocities.append(max(MIN_TURN_SPEED, v_turn))
+        turn_velocities.append(compute_safe_turn_speed(angle))
 
+    # Prędkości: [start=0] + [zakręty] + [stop=0]
     node_velocities = [0.0] + turn_velocities + [0.0]
-    total_time = 0.0
 
+    # Forward pass: nie możemy przyspieszać szybciej niż fizyka pozwala
+    for i in range(1, len(node_velocities)):
+        seg_idx = min(i - 1, len(segments) - 1)
+        seg_len = segments[seg_idx]
+        v_reachable = math.sqrt(max(0.0, node_velocities[i - 1] ** 2 + 2 * a * seg_len))
+        node_velocities[i] = min(node_velocities[i], v_reachable, v_max)
+
+    # Backward pass: musimy zdążyć wyhamować do prędkości następnego węzła
+    for i in range(len(node_velocities) - 2, -1, -1):
+        seg_idx = min(i, len(segments) - 1)
+        seg_len = segments[seg_idx]
+        v_reachable = math.sqrt(max(0.0, node_velocities[i + 1] ** 2 + 2 * a * seg_len))
+        node_velocities[i] = min(node_velocities[i], v_reachable)
+
+    total_time = 0.0
     for i, L in enumerate(segments):
+        if L <= 0:
+            continue
+
         v_start = node_velocities[i]
         v_end = node_velocities[i + 1]
 
-        min_breaking_dist = abs(v_start ** 2 - v_end ** 2) / (2 * a)
-        if min_breaking_dist > L:
-            total_time += (L / max(0.1, (v_start + v_end) / 2)) + 2.0
-            continue
+        # Po forward-backward pass, fizyczne ograniczenia są gwarantowane.
+        # Obliczamy szczytową prędkość na segmencie.
+        v_peak_sq = (2 * a * L + v_start ** 2 + v_end ** 2) / 2.0
+        v_peak = min(math.sqrt(max(0.0, v_peak_sq)), v_max)
 
-        v_reach_squared = a * L + (v_start ** 2 + v_end ** 2) / 2.0
-        v_reach = math.sqrt(v_reach_squared)
-
-        if v_reach >= v_max:
-            t_acc = (v_max - v_start) / a
-            t_dec = (v_max - v_end) / a
-            d_acc = (v_max ** 2 - v_start ** 2) / (2 * a)
-            d_dec = (v_max ** 2 - v_end ** 2) / (2 * a)
-            d_cruise = max(0, L - d_acc - d_dec)
-            t_cruise = d_cruise / v_max
-            total_time += (t_acc + t_cruise + t_dec)
+        if v_peak >= v_max:
+            # Segment z fazą cruise
+            d_acc = max(0.0, (v_max ** 2 - v_start ** 2) / (2 * a))
+            d_dec = max(0.0, (v_max ** 2 - v_end ** 2) / (2 * a))
+            d_cruise = max(0.0, L - d_acc - d_dec)
+            t_acc = (v_max - v_start) / a if v_max > v_start else 0.0
+            t_dec = (v_max - v_end) / a if v_max > v_end else 0.0
+            t_cruise = d_cruise / v_max if v_max > 0 else 0.0
+            total_time += t_acc + t_cruise + t_dec
         else:
-            t_acc = abs(v_reach - v_start) / a
-            t_dec = abs(v_reach - v_end) / a
-            total_time += (t_acc + t_dec)
+            # Trójkąt prędkości: rozpędzanie do v_peak, potem hamowanie
+            t_acc = abs(v_peak - v_start) / a if a > 0 else 0.0
+            t_dec = abs(v_peak - v_end) / a if a > 0 else 0.0
+            total_time += t_acc + t_dec
 
     return total_time
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# GŁÓWNA FUNKCJA PRZESZUKIWANIA
+# [FIX #2, #5]  Ujednolicona proporcjonalna formuła kary dla wszystkich algo
+# [FIX #16]     braking_penalty w jednostkach dystansu (nie czasu)
+# [FIX #22]     Zwraca rzeczywisty czas obliczeń przy braku trasy
+# ─────────────────────────────────────────────────────────────────────────────
 def base_search(
         grid_map: GridMap,
         start: Tuple[int, int],
         goal: Tuple[int, int],
         risk_weight: float = RISK_WEIGHT,
-        turn_penalty: float = TURN_PENALTY_CLASSIC,
+        turn_penalty: float = TURN_PENALTY,
         drone_radius: float = COLLISION_RADIUS,
         initial_direction: Tuple[int, int] = (0, 0),
         current_speed: float = 0.0,
@@ -227,20 +298,11 @@ def base_search(
     start_node = Node(start[0], start[1], 0.0, direction=initial_direction, speed=current_speed)
 
     if use_kinematics:
-        # straight_dist = łączna długość prostego odcinka kończącego się w tym węźle
-        # (od ostatniego zakrętu lub startu do bieżącego węzła)
         start_node.straight_dist = initial_straight_dist
 
     open_list = []
     heapq.heappush(open_list, start_node)
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # POPRAWKA #1 (kontynuacja): Spójny 5-elementowy klucz dla obu struktur.
-    #   Oryginał: g_score używał 5-elementowego klucza przy inicjalizacji,
-    #             ale 4-elementowego (bez straight_steps) przy sprawdzaniu
-    #             sąsiadów → lookup zawsze zwracał "klucz nie istnieje"
-    #             → każda ścieżka przez (x,y,dx,dy) była akceptowana.
-    # ─────────────────────────────────────────────────────────────────────────
     if use_kinematics:
         init_bucket = _braking_bucket(initial_straight_dist)
         g_score: dict = {
@@ -267,8 +329,6 @@ def base_search(
                 "flight_time": flight_time
             }
 
-        # Klucz odwiedzin – dla kinematyki uwzględniamy kubełek straight_dist,
-        # bo ten sam (x,y,dir) z większym straight_dist otwiera inne możliwości hamowania
         if use_kinematics:
             sd_current = getattr(current, 'straight_dist', 0.0)
             state_key = (
@@ -300,56 +360,50 @@ def base_search(
             straight_dist = getattr(current, 'straight_dist', 0.0)
             new_speed = current.speed
 
-            # ── MODEL ZAAWANSOWANY (Risk A*) ──────────────────────────────
+            # ── MODEL ZAAWANSOWANY (Risk-Aware A*) ────────────────────────
             if use_kinematics:
                 node_speed = current.speed
 
-                # Domyślnie: lot na wprost – przyspieszenie do V_max
                 new_speed = min(V_MAX_MS, math.sqrt(node_speed ** 2 + 2 * ACCELERATION * dist_cost))
-                # straight_dist sąsiada = akumulacja jeśli idziemy prosto
                 new_straight_dist = straight_dist + dist_cost
 
                 if v1 != (0, 0) and v1 != v2:
-                    dot_product = v1[0] * v2[0] + v1[1] * v2[1]
-                    mag1 = math.sqrt(v1[0] ** 2 + v1[1] ** 2)
-                    mag2 = math.sqrt(v2[0] ** 2 + v2[1] ** 2)
-                    cos_theta = max(-1.0, min(1.0, dot_product / (mag1 * mag2)))
-                    angle = math.acos(cos_theta)
+                    # [FIX #2] Kąt obliczany wspólną funkcją
+                    base_turn_cost, angle = compute_turn_cost(v1, v2, turn_penalty)
 
-                    # HARD LIMIT: zawrócenie w locie (~180°) – fizycznie niemożliwe
+                    # HARD LIMIT: zawrócenie (~180°) — fizycznie niemożliwe
                     if angle >= math.radians(170):
                         continue
 
-                    # Prędkość bezpieczna dla tego zakrętu (fizyka dośrodkowa)
-                    r_turn = 1.5 / max(0.1, math.sin(angle / 2))
-                    v_safe_turn = max(MIN_TURN_SPEED, math.sqrt(MAX_LATERAL_ACCEL * r_turn))
-                    v_safe_turn = min(v_safe_turn, V_MAX_MS)
+                    # [FIX #18] Promień z udokumentowanej funkcji
+                    v_safe_turn = compute_safe_turn_speed(angle)
 
+                    # [FIX #16] braking_penalty wyrażone w DYSTANSIE [kratki=metry],
+                    # spójne z dist_cost i turn_cost.
+                    # Fizyczny sens: dodatkowa droga „utracona" na hamowanie.
                     braking_penalty = 0.0
                     if node_speed > v_safe_turn:
                         available_braking_dist = straight_dist + dist_cost
                         braking_dist_needed = (node_speed ** 2 - v_safe_turn ** 2) / (2 * ACCELERATION)
                         if braking_dist_needed > available_braking_dist:
-                            continue  # Fizycznie niemożliwe – odrzuć tę krawędź
+                            continue  # Fizycznie niemożliwe
 
-                        braking_penalty = (node_speed - v_safe_turn) / ACCELERATION
+                        braking_penalty = braking_dist_needed  # [FIX #16] dystans, nie czas
 
-                    # Po zakręcie: nowa prędkość = v_safe_turn
                     new_speed = v_safe_turn
-                    turn_cost = turn_penalty * (angle / (math.pi / 2)) + braking_penalty
-
+                    turn_cost = base_turn_cost + braking_penalty
                     new_straight_dist = 0.0
 
             # ── MODEL KLASYCZNY (Dijkstra / A* Standard) ──────────────────
+            # [FIX #2, #5] Ta sama formuła proporcjonalna do kąta
             else:
-                new_straight_dist = 0.0   # nieużywane, ale dla spójności
+                new_straight_dist = 0.0
                 if current.parent is not None:
-                    if v1 != (0, 0) and v1 != v2:
-                        turn_cost = turn_penalty
+                    base_turn_cost, angle = compute_turn_cost(v1, v2, turn_penalty)
+                    turn_cost = base_turn_cost
 
             new_g = current.cost + dist_cost + static_risk_cost + turn_cost
 
-            # Spójny klucz g_score – 5-elementowy dla kinematyki
             if use_kinematics:
                 neighbor_key = (nx, ny, dx, dy, _braking_bucket(new_straight_dist))
             else:
@@ -371,4 +425,8 @@ def base_search(
 
                 heapq.heappush(open_list, neighbor)
 
-    return [], {"found": False, "time": 0, "length": 0, "risk": 0, "turns": 0, "nodes": nodes_expanded}
+    execution_time = time.time() - t0
+    return [], {
+        "found": False, "time": execution_time, "length": 0, "risk": 0,
+        "turns": 0, "nodes": nodes_expanded, "flight_time": 0
+    }

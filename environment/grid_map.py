@@ -4,7 +4,7 @@ from typing import List, Tuple
 from scipy.ndimage import distance_transform_edt
 from config import (
     BUILDING_SAFE_MARGIN, GRADIENT_RANGE, GRADIENT_DECAY,
-    COLLISION_RADIUS
+    COLLISION_RADIUS, COLLISION_GRID_THRESHOLD, SOFT_RISK_CAP
 )
 
 
@@ -25,6 +25,13 @@ class GridMap:
 
         self._generate_urban_layout(obstacle_density, start_pos, goal_pos)
         self._generate_soft_risk_zones(risk_zones_count, start_pos, goal_pos)
+
+    # [FIX #7] Wyodrębniona metoda — wywoływana po każdej zmianie budynków/przeszkód
+    def _recompute_dist_matrix(self) -> None:
+        """Przelicza macierz euklidesowych odległości od najbliższego budynku (grid==1.0)."""
+        walls = (self.grid == 1.0).astype(float)
+        inverted_grid = 1.0 - walls
+        self.dist_matrix = distance_transform_edt(inverted_grid)
 
     def _generate_urban_layout(self, density: float, start_pos, goal_pos) -> None:
         total_pixels = self.width * self.height
@@ -55,36 +62,41 @@ class GridMap:
                 if random.random() > 0.3:
                     continue
 
+            # [FIX #20] Liczymy TYLKO nowo pokryte piksele (te, które wcześniej nie były budynkiem)
+            new_pixels = int(np.sum(region < 1.0))
             self.grid[x:x + w, y:y + h] = 1.0
-            current_pixels += w * h
+            current_pixels += new_pixels
 
-        walls = (self.grid == 1.0).astype(float)
-        inverted_grid = 1.0 - walls
-        self.dist_matrix = distance_transform_edt(inverted_grid)
+        # [FIX #7] Centralne przeliczenie dist_matrix
+        self._recompute_dist_matrix()
 
         risk_gradient = np.exp(-self.dist_matrix / GRADIENT_DECAY)
         risk_gradient = np.clip(risk_gradient, 0.0, 0.99)
         risk_gradient[self.dist_matrix > GRADIENT_RANGE] = 0.0
 
+        walls = (self.grid == 1.0)
         self.grid = np.maximum(self.grid, risk_gradient)
-        self.grid[walls == 1.0] = 1.0
+        self.grid[walls] = 1.0
 
     def get_cost(self, x: int, y: int) -> float:
         if 0 <= x < self.width and 0 <= y < self.height:
             return float(self.grid[x, y])
         return 1.0
 
+    # [FIX #8] Usunięto *1.41 — EDT zwraca odległość euklidesową,
+    # więc porównanie z drone_radius jest poprawne bez korekty.
+    # [FIX #6] Próg kolizji z config (COLLISION_GRID_THRESHOLD)
     def is_collision(self, x, y, drone_radius: float = COLLISION_RADIUS) -> bool:
         physical_margin = 1
         if not (physical_margin <= x < self.width - physical_margin
                 and physical_margin <= y < self.height - physical_margin):
             return True
 
-        # Sprawdzenie odległości od budynków (z korektą na skosy: *1.41)
-        if self.dist_matrix[x, y] <= (drone_radius * 1.41):
+        # EDT dist_matrix jest euklidesowa → bezpośrednie porównanie z promieniem
+        if self.dist_matrix[x, y] <= drone_radius:
             return True
 
-        if self.grid[x, y] >= 0.90:
+        if self.grid[x, y] >= COLLISION_GRID_THRESHOLD:
             return True
 
         for (ox, oy, r) in self.dynamic_obstacles:
@@ -94,10 +106,11 @@ class GridMap:
 
         return False
 
+    # [FIX #7] Dynamiczna przeszkoda przelicza dist_matrix
     def add_dynamic_risk_zone(self, cx: int, cy: int, radius: int = 10) -> None:
         """
         Dodaje strefę dynamiczną logicznie (do listy) i wizualnie (gradient na mapie).
-        Parametry gradientu pobierane z config.
+        Przelicza dist_matrix aby is_collision() uwzględniała nową przeszkodę.
         """
         self.dynamic_obstacles.append((cx, cy, radius))
 
@@ -122,12 +135,11 @@ class GridMap:
                     if self.grid[x, y] < 1.0:
                         self.grid[x, y] = max(self.grid[x, y], risk_val)
 
+        # [FIX #7] Przelicz macierz odległości po dodaniu przeszkody
+        self._recompute_dist_matrix()
+
     def _generate_soft_risk_zones(self, num_zones: int, start_pos: Tuple[int, int],
                                    goal_pos: Tuple[int, int]) -> None:
-        """
-        Generuje półprzezroczyste strefy ryzyka o różnych kształtach.
-        Nie pokrywają się z budynkami ani ze startem/celem.
-        """
         import math
 
         zones_placed = 0
@@ -150,7 +162,7 @@ class GridMap:
                 x_min = random.randint(0, self.width - s - 1)
                 y_min = random.randint(0, self.height - s - 1)
                 x_max, y_max = x_min + s, y_min + s
-            else:  # rectangle
+            else:
                 w = random.randint(20, 50)
                 h = random.randint(15, 35)
                 if random.random() > 0.5:
@@ -179,7 +191,8 @@ class GridMap:
                         dist = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
                         if dist <= r:
                             risk_val = peak_risk * (1.0 - (dist / r))
-                            self.grid[x, y] = min(0.85, self.grid[x, y] + risk_val)
+                            # [FIX #6] Jawne użycie SOFT_RISK_CAP
+                            self.grid[x, y] = min(SOFT_RISK_CAP, self.grid[x, y] + risk_val)
                     else:
                         dx = min(x - x_min, x_max - x - 1)
                         dy = min(y - y_min, y_max - y - 1)
@@ -187,6 +200,6 @@ class GridMap:
                         max_dist = min((x_max - x_min) / 2.0, (y_max - y_min) / 2.0)
                         if max_dist > 0:
                             risk_val = peak_risk * (dist_to_edge / max_dist)
-                            self.grid[x, y] = min(0.85, self.grid[x, y] + risk_val)
+                            self.grid[x, y] = min(SOFT_RISK_CAP, self.grid[x, y] + risk_val)
 
             zones_placed += 1

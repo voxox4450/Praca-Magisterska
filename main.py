@@ -9,14 +9,11 @@ from typing import Tuple
 import random
 import numpy as np
 
-# ─────────────────────────────────────────────────────────────────────────────
-# JEDYNE MIEJSCE KONFIGURACJI – zmień tu, zmiana działa wszędzie
-# ─────────────────────────────────────────────────────────────────────────────
 from config import (
     MAP_SIZE, RISK_ZONES_COUNT, RANDOM_SEED,
     START_POS, GOAL_POS,
     COLLISION_RADIUS,
-    RISK_WEIGHT, TURN_PENALTY_CLASSIC, TURN_PENALTY_RISK,
+    RISK_WEIGHT, TURN_PENALTY,
     N_TESTS,
     DRONE_MASS_KG, MAX_THRUST_NET_N, V_MAX_MS
 )
@@ -31,7 +28,7 @@ def main() -> None:
         print(f"   SYSTEM PLANOWANIA TRAS BSP     ")
         print(f"=" * 32)
         print(f"Mapa: {MAP_SIZE}x{MAP_SIZE} | Start: {START_POS} | Cel: {GOAL_POS}")
-        print(f"Dron: {DRONE_MASS_KG} kg | V_max: {V_MAX_MS} m/s | W={RISK_WEIGHT} | Kara klasyczna={TURN_PENALTY_CLASSIC} / Risk={TURN_PENALTY_RISK}")
+        print(f"Dron: {DRONE_MASS_KG} kg | V_max: {V_MAX_MS} m/s | W={RISK_WEIGHT} | Kara={TURN_PENALTY}")
         print(f"=" * 32)
         print("WYBIERZ TRYB PRACY:")
         print("1. Wersja Statyczna (Offline) ")
@@ -54,6 +51,7 @@ def main() -> None:
             print("Nieprawidłowy wybór")
 
 
+# [FIX #27] Informacja zwrotna przy nieprawidłowym wejściu
 def get_user_difficulty() -> float:
     """Wspólna funkcja wyboru trudności dla obu trybów."""
     print("\nWYBIERZ POZIOM TRUDNOŚCI OTOCZENIA:")
@@ -69,6 +67,8 @@ def get_user_difficulty() -> float:
             return 0.15
         elif choice == '3':
             return 0.30
+        else:
+            print("Nieprawidłowy wybór — wpisz 1, 2 lub 3.")
 
 
 def run_offline_mode(density: float, interactive: bool = True, density_label: str = "") -> None:
@@ -78,25 +78,26 @@ def run_offline_mode(density: float, interactive: bool = True, density_label: st
     env = GridMap(
         width=MAP_SIZE, height=MAP_SIZE,
         start_pos=START_POS, goal_pos=GOAL_POS,
-        risk_zones_count=RISK_ZONES_COUNT,   # z config – ujednolicone
+        risk_zones_count=RISK_ZONES_COUNT,
         obstacle_density=density
     )
 
+    # [FIX #2] Wspólna kara TURN_PENALTY dla wszystkich algorytmów
     path_d, stats_d = run_dijkstra(env, START_POS, GOAL_POS,
-                                   risk_weight=RISK_WEIGHT, turn_penalty=TURN_PENALTY_CLASSIC,
+                                   risk_weight=RISK_WEIGHT, turn_penalty=TURN_PENALTY,
                                    drone_radius=COLLISION_RADIUS)
     path_a, stats_a = run_astar(env, START_POS, GOAL_POS,
-                                risk_weight=RISK_WEIGHT, turn_penalty=TURN_PENALTY_CLASSIC,
+                                risk_weight=RISK_WEIGHT, turn_penalty=TURN_PENALTY,
                                 drone_radius=COLLISION_RADIUS)
     path_r, stats_r = run_risk_astar(env, START_POS, GOAL_POS,
-                                     risk_weight=RISK_WEIGHT, turn_penalty=TURN_PENALTY_RISK,
+                                     risk_weight=RISK_WEIGHT, turn_penalty=TURN_PENALTY,
                                      drone_radius=COLLISION_RADIUS)
 
     generate_thesis_charts(
         envs=[env], start=START_POS, goal=GOAL_POS,
         func_dijkstra=run_dijkstra, func_astar=run_astar, func_risk_astar=run_risk_astar,
         collision_radius=COLLISION_RADIUS, density_label=density_label,
-        turn_penalty_classic=TURN_PENALTY_CLASSIC, turn_penalty_risk=TURN_PENALTY_RISK
+        turn_penalty=TURN_PENALTY
     )
 
     if interactive:
@@ -119,12 +120,15 @@ def run_batch_benchmark() -> None:
         "30_procent_duzo":   0.30,
     }
 
-    for label, den in scenarios.items():
-        # Reset ziarna dla każdego scenariusza → pełna reprodukowalność
-        random.seed(RANDOM_SEED)
-        np.random.seed(RANDOM_SEED)
+    for scenario_idx, (label, den) in enumerate(scenarios.items()):
+        # [FIX #26] Osobne ziarno per scenariusz → statystycznie niezależne mapy.
+        # RANDOM_SEED + scenario_idx zapewnia reprodukowalność,
+        # ale mapy 5% nie są podzbiorem map 15%.
+        scenario_seed = RANDOM_SEED + scenario_idx * 1000
+        random.seed(scenario_seed)
+        np.random.seed(scenario_seed)
 
-        print(f"\n---> Scenariusz: {label} (Gęstość: {den * 100:.0f}%, Próby: {N_TESTS})")
+        print(f"\n---> Scenariusz: {label} (Gęstość: {den * 100:.0f}%, Próby: {N_TESTS}, Seed: {scenario_seed})")
         print("Generowanie weryfikowanych map (odrzucanie nierozwiązywalnych)...")
 
         envs = []
@@ -136,13 +140,10 @@ def run_batch_benchmark() -> None:
             env = GridMap(
                 width=MAP_SIZE, height=MAP_SIZE,
                 start_pos=START_POS, goal_pos=GOAL_POS,
-                risk_zones_count=RISK_ZONES_COUNT,   # z config – ujednolicone
+                risk_zones_count=RISK_ZONES_COUNT,
                 obstacle_density=den
             )
 
-            # Walidacja geometryczna (W=0, kara=0): najłatwiejszy wariant dla każdego algorytmu.
-            # Jeśli którykolwiek nie znajdzie trasy przy zerowym ryzyku, mapa jest nierozwiązywalna
-            # i nie ma sensu jej używać w benchmarku dla żadnej wagi W.
             _, sd = run_dijkstra(env, START_POS, GOAL_POS,
                                  risk_weight=0.0, turn_penalty=0.0, drone_radius=COLLISION_RADIUS)
             _, sa = run_astar(env, START_POS, GOAL_POS,
@@ -162,7 +163,7 @@ def run_batch_benchmark() -> None:
             envs, START_POS, GOAL_POS,
             run_dijkstra, run_astar, run_risk_astar,
             COLLISION_RADIUS, density_label=label,
-            turn_penalty_classic=TURN_PENALTY_CLASSIC, turn_penalty_risk=TURN_PENALTY_RISK
+            turn_penalty=TURN_PENALTY
         )
 
     print("\n" + "=" * 50)

@@ -14,6 +14,11 @@ RANDOM_SEED: int = 42                # Ziarno losowości (dla reprodukowalności
 START_POS = (5, 5)                   # Pozycja startowa drona
 GOAL_POS  = (195, 195)               # Pozycja docelowa drona
 
+# [FIX #17] Jawna definicja przelicznika kratka → metr.
+# CAŁA kinematyka (V_MAX, ACCELERATION, dist_cost, braking_dist) zakłada tę równość.
+# Zmiana CELL_SIZE_M wymaga przeliczenia WSZYSTKICH parametrów fizycznych.
+CELL_SIZE_M: float = 1.0             # 1 kratka = 1 metr
+
 # Ochrona startu/celu przed budynkami [kratki]
 BUILDING_SAFE_MARGIN: float = 4.0
 
@@ -21,74 +26,72 @@ BUILDING_SAFE_MARGIN: float = 4.0
 GRADIENT_RANGE: int   = 15           # Zasięg gradientu [kratki]
 GRADIENT_DECAY: float = 6.0          # Stała zaniku eksponencjalnego (exp(-d / DECAY))
 
+# [FIX #6] Jawne progi kolizji i ryzyka:
+#   grid == 1.0                          → budynek (fizyczna przeszkoda)
+#   COLLISION_GRID_THRESHOLD ≤ grid < 1  → strefa kolizji (jak budynek w is_collision)
+#   0.0 < grid < COLLISION_GRID_THRESHOLD → strefa ryzyka (przelotowa, kosztowna)
+#   grid == 0.0                          → przestrzeń wolna
+COLLISION_GRID_THRESHOLD: float = 0.90
+SOFT_RISK_CAP: float = 0.85          # Maksymalna wartość miękkiej strefy ryzyka
+
 # ─────────────────────────────────────────────────────────────────────────────
 # PARAMETRY FIZYCZNE DRONA
 # ─────────────────────────────────────────────────────────────────────────────
 DRONE_RADIUS_M: float  = 1.0         # Fizyczny promień drona [m]
 SAFE_MARGIN_M: float   = 2.0         # Margines bezpieczeństwa od budynków [m]
 
-# COLLISION_RADIUS używany przez algorytmy = fizyczny promień + margines
-COLLISION_RADIUS: float = DRONE_RADIUS_M + SAFE_MARGIN_M   # = 3.0 [m]
+# COLLISION_RADIUS = fizyczny promień + margines [m = kratki przy CELL_SIZE_M=1.0]
+COLLISION_RADIUS: float = DRONE_RADIUS_M + SAFE_MARGIN_M   # = 3.0
 
 DRONE_MASS_KG: float       = 30.0    # Masa drona [kg]
 MAX_THRUST_NET_N: float    = 120.0   # Ciąg netto (po odjęciu ciężaru) [N]
 
 # Kinematyka liniowa
 V_MAX_MS: float        = 18.0        # Maksymalna prędkość przelotowa [m/s]
-#   UWAGA: Poprzednio używane 65 km/h = 18.05 m/s → zaokrąglone do 18.0 m/s
-#   65 km/h / 3.6 = 18.055... m/s  →  używamy V_MAX_MS = 18.0 WSZĘDZIE
-
 ACCELERATION: float    = MAX_THRUST_NET_N / DRONE_MASS_KG  # = 4.0 [m/s²]
 
 # Kinematyka zakrętów
 MAX_LATERAL_ACCEL: float = 7.0       # Maks. przyspieszenie dośrodkowe [m/s²] (~0.7g)
 MIN_TURN_SPEED: float    = 0.5       # Minimalna prędkość w zakręcie [m/s]
 
+# Formuła: r_turn = TURN_RADIUS_CONST / sin(angle/2)
+# Pochodzenie: dla łuku kołowego wpisanego między dwa odcinki o długości d
+# spotykające się pod kątem zwrotu θ: r ≈ d / (2·sin(θ/2)).
+# Dla siatki 8-kierunkowej średnia długość kroku ≈ (1.0 + 1.41)/2 ≈ 1.2,
+# d/2 ≈ 0.6 — zaokrąglone w górę do 1.5 jako margines bezpieczeństwa,
+# uwzględniający dyskretyzację i wygładzanie B-spline.
+TURN_RADIUS_CONST: float = 1.5
+
 # ─────────────────────────────────────────────────────────────────────────────
 # PARAMETRY ALGORYTMÓW
 # ─────────────────────────────────────────────────────────────────────────────
 RISK_WEIGHT: float    = 20.0         # Domyślna waga kosztu ryzyka (W)
 
-# Kary za zakręty – celowo rozdzielone:
-#   CLASSIC: stała kara niezależna od kąta – Dijkstra i A* Standard pozostają
-#            w oryginalnej, niezmienionej formie (algorytmy bazowe/baseline).
-#   RISK:    kara proporcjonalna do kąta zakrętu – część modelu kinematycznego
-#            Risk-Aware A*.
-#            Wzór: turn_cost = TURN_PENALTY_RISK * (angle / (pi/2))
-#            →  zakręt  45° = 0.50 × TURN_PENALTY_RISK
-#            →  zakręt  90° = 1.00 × TURN_PENALTY_RISK
-#            →  zakręt 135° = 1.50 × TURN_PENALTY_RISK
-TURN_PENALTY_CLASSIC: float = 20.0   # Używane przez: Dijkstra, A* Standard
-TURN_PENALTY_RISK: float    = 20.0   # Używane przez: Risk-Aware A* (proporcjonalne do kąta)
+# Wszystkie 3 algorytmy (Dijkstra, A*, Risk-Aware A*) operują na tym samym
+# modelu drona → ta sama formuła kary za zakręt:
+#   turn_cost = TURN_PENALTY × (angle / (π/2))
+# Różnica między algorytmami leży WYŁĄCZNIE w:
+#   - heurystyce (Dijkstra: brak, A*/Risk: euklidesowa)
+#   - kinematyce (tylko Risk-Aware: profil prędkości + hamowanie)
+TURN_PENALTY: float = 20.0
 
-# Heurystyki (tie-breakery) – jawnie rozdzielone dla każdego algorytmu
-HEURISTIC_MULT_ASTAR: float = 1.001  # A* Standard: minimalne wzmocnienie (prawie Dijkstra)
-HEURISTIC_MULT_RISK:  float = 1.001    # Risk-Aware A*: silniejsze wzmocnienie (przy W=20)
-#   UWAGA: Poprzednio Risk A* używał min(2.5, 1.0 + risk_weight*0.05),
-#          co dawało RÓŻNĄ heurystykę przy każdym W → niesprawiedliwe porównanie.
-#          Teraz STAŁA wartość → uczciwy benchmark.
+# Mnożnik > 1.0 → Weighted A* (ε = multiplier − 1.0).
+# Gwarancja: koszt rozwiązania ≤ (1+ε) × optimum.
+# Ustawienie 1.0 → czysta dopuszczalność (gwarancja optymalności, wolniejsze).
+HEURISTIC_MULT_ASTAR: float = 1.001  # ε = 0.001 (~0.1% ponad optimum)
+HEURISTIC_MULT_RISK:  float = 1.001  # ε = 0.001
 
 # ─────────────────────────────────────────────────────────────────────────────
 # BENCHMARK (Monte Carlo)
 # ─────────────────────────────────────────────────────────────────────────────
-N_TESTS: int = 50                # Liczba prób Monte Carlo (min. 20-30 dla istotności stat.)
+N_TESTS: int = 50                # Liczba prób Monte Carlo
 
-# Wagi ryzyka używane w sweep Pareto (od 0 do 50, co 5)
+# Wagi ryzyka w sweep Pareto
 PARETO_WEIGHT_STEP: int = 5
 PARETO_WEIGHT_MAX:  int = 50
 
 # ─────────────────────────────────────────────────────────────────────────────
-# WIZUALIZACJA
+# PLANOWANIE KINEMATYCZNE / SYMULACJA ONLINE
 # ─────────────────────────────────────────────────────────────────────────────
-COLORBAR_V_MAX: float = V_MAX_MS     # Górna granica paska prędkości (zawsze = V_MAX_MS)
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PLANOWANIE KINEMATYCZNE
-# ─────────────────────────────────────────────────────────────────────────────
-SENSOR_RANGE: int = 60               # Zasięg sensora drona [kratki] – lookahead dla planera
-
-# Dynamiczny margines kolizji przy prędkości:
-# effective_radius = COLLISION_RADIUS + node_speed² / (2 * ACCELERATION)
-# Dotyczy TYLKO twardych przeszkód (budynki, dist_matrix).
-# Strefy ryzyka (grid < 0.90) są nadal przelatywalne przy każdej prędkości.
-DYNAMIC_COLLISION: bool = True       # Włącz/wyłącz dynamiczny margines
+# [FIX #24] Zasięg sensora — importowany z config wszędzie (nie hardcoded)
+SENSOR_RANGE: int = 60               # Zasięg sensora drona [kratki]
