@@ -11,6 +11,14 @@ from config import (
 )
 
 
+BRAKING_BUCKET_SIZE: float = 5.0   # [kratki] – dokładność dyskretyzacji drogi hamowania
+
+
+def _braking_bucket(straight_dist: float) -> int:
+    """Konwertuje ciągły straight_dist na dyskretny kubełek dla klucza stanu."""
+    return min(int(straight_dist / BRAKING_BUCKET_SIZE), 20)
+
+
 class Node:
     def __init__(self, x: int, y: int, cost: float, parent: Optional['Node'] = None,
                  direction: Tuple[int, int] = (0, 0), heuristic: float = 0.0,
@@ -92,15 +100,8 @@ def generate_analysis_table(
         base_risk: float,
         collision_radius: float,
         table_title: str = "ANALIZA",
-        turn_penalty: float = TURN_PENALTY_CLASSIC   # przekaż TURN_PENALTY_RISK dla Risk A*
+        turn_penalty: float = TURN_PENALTY_CLASSIC
 ) -> None:
-    """
-    Wspólna funkcja do generowania tabeli analizy dla różnych wag ryzyka.
-    Zakres wag pochodzi z config (PARETO_WEIGHT_MAX, PARETO_WEIGHT_STEP).
-    Parametr turn_penalty powinien odpowiadać typowi algorytmu:
-      - TURN_PENALTY_CLASSIC dla Dijkstry / A* Standard
-      - TURN_PENALTY_RISK    dla Risk-Aware A*
-    """
     from config import PARETO_WEIGHT_MAX, PARETO_WEIGHT_STEP, RISK_WEIGHT
     risk_weights = sorted(set(
         [float(x) for x in range(0, PARETO_WEIGHT_MAX + 1, PARETO_WEIGHT_STEP)] + [RISK_WEIGHT]
@@ -120,11 +121,9 @@ def generate_analysis_table(
 
         if stats['found'] and base_len > 0:
             len_inc = ((stats['length'] - base_len) / base_len) * 100
-
             risk_change = 0.0
             if base_risk > 0:
                 risk_change = ((stats['risk'] - base_risk) / base_risk) * 100
-
             print(
                 f"{w:<10.1f} | {stats['length']:<10.2f} | +{len_inc:<9.2f} | {stats['risk']:<10.2f} | {risk_change:<+19.2f}")
         else:
@@ -137,22 +136,13 @@ def calculate_kinematic_flight_time(
         path: List[Tuple[int, int]],
         mass: float = DRONE_MASS_KG,
         max_thrust_net: float = MAX_THRUST_NET_N,
-        v_max: float = V_MAX_MS          # [m/s] – już nie km/h!
+        v_max: float = V_MAX_MS
 ) -> float:
-    """
-    Model kinematyczny BSP: Oblicza realistyczny czas przelotu trasy.
-    Uwzględnia masę, przyspieszenie, V_max oraz konieczność hamowania przed zakrętami.
-
-    Parametry domyślne pobierane z config.py – nie trzeba podawać ręcznie.
-    v_max podawane w [m/s] (nie km/h).
-    """
     if len(path) < 2:
         return 0.0
 
-    # Przyspieszenie z parametrów fizycznych
-    a = max_thrust_net / mass          # np. 120 N / 30 kg = 4.0 m/s²
+    a = max_thrust_net / mass
 
-    # Wyodrębnienie prostych odcinków i kątów zakrętów
     segments: List[float] = []
     turn_angles: List[float] = []
 
@@ -182,18 +172,14 @@ def calculate_kinematic_flight_time(
 
     segments.append(current_len)
 
-    # Prędkości w węzłach zakrętów — spójna fizyka z planistą
     turn_velocities = []
     for angle in turn_angles:
         r_approx = 1.5 / max(0.1, math.sin(angle / 2))
         v_centripetal = math.sqrt(MAX_LATERAL_ACCEL * r_approx)
-
         v_turn = min(v_centripetal, v_max)
         turn_velocities.append(max(MIN_TURN_SPEED, v_turn))
 
-    # Prędkości w węzłach (start i koniec = 0)
     node_velocities = [0.0] + turn_velocities + [0.0]
-
     total_time = 0.0
 
     for i, L in enumerate(segments):
@@ -202,18 +188,13 @@ def calculate_kinematic_flight_time(
 
         min_breaking_dist = abs(v_start ** 2 - v_end ** 2) / (2 * a)
         if min_breaking_dist > L:
-            # Fizycznie niemożliwe wyhamowanie (błąd siatki/zbyt ostre zakręty).
-            # Doliczamy karny czas jako "awaryjne zatrzymanie"
             total_time += (L / max(0.1, (v_start + v_end) / 2)) + 2.0
             continue
 
-        # Szczytowa prędkość osiągalna na odcinku z kinematyki (trójkąt)
-        # 2aL = v_reach^2 - v_start^2 + v_reach^2 - v_end^2
         v_reach_squared = a * L + (v_start ** 2 + v_end ** 2) / 2.0
         v_reach = math.sqrt(v_reach_squared)
 
         if v_reach >= v_max:
-            # Profil trapezowy (osiąga V_max)
             t_acc = (v_max - v_start) / a
             t_dec = (v_max - v_end) / a
             d_acc = (v_max ** 2 - v_start ** 2) / (2 * a)
@@ -222,7 +203,6 @@ def calculate_kinematic_flight_time(
             t_cruise = d_cruise / v_max
             total_time += (t_acc + t_cruise + t_dec)
         else:
-            # Profil trójkątny (nie osiąga V_max)
             t_acc = abs(v_reach - v_start) / a
             t_dec = abs(v_reach - v_end) / a
             total_time += (t_acc + t_dec)
@@ -247,18 +227,29 @@ def base_search(
     start_node = Node(start[0], start[1], 0.0, direction=initial_direction, speed=current_speed)
 
     if use_kinematics:
-        start_node.straight_dist = initial_straight_dist   # Dystans przeleciony prosto PRZED węzłem startu
-        start_node.straight_steps = 100
+        # straight_dist = łączna długość prostego odcinka kończącego się w tym węźle
+        # (od ostatniego zakrętu lub startu do bieżącego węzła)
+        start_node.straight_dist = initial_straight_dist
 
     open_list = []
     heapq.heappush(open_list, start_node)
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # POPRAWKA #1 (kontynuacja): Spójny 5-elementowy klucz dla obu struktur.
+    #   Oryginał: g_score używał 5-elementowego klucza przy inicjalizacji,
+    #             ale 4-elementowego (bez straight_steps) przy sprawdzaniu
+    #             sąsiadów → lookup zawsze zwracał "klucz nie istnieje"
+    #             → każda ścieżka przez (x,y,dx,dy) była akceptowana.
+    # ─────────────────────────────────────────────────────────────────────────
     if use_kinematics:
-        g_score = {(start[0], start[1], initial_direction[0], initial_direction[1],0): 0.0}
+        init_bucket = _braking_bucket(initial_straight_dist)
+        g_score: dict = {
+            (start[0], start[1], initial_direction[0], initial_direction[1], init_bucket): 0.0
+        }
     else:
         g_score = {(start[0], start[1]): 0.0}
 
-    visited = set()
+    visited: set = set()
     nodes_expanded = 0
 
     while open_list:
@@ -268,7 +259,7 @@ def base_search(
         if (current.x, current.y) == goal:
             execution_time = time.time() - t0
             path, length, total_risk, turns = reconstruct_path(current, grid_map)
-            flight_time = calculate_kinematic_flight_time(path)   # parametry z config
+            flight_time = calculate_kinematic_flight_time(path)
 
             return path, {
                 "found": True, "time": execution_time, "length": length,
@@ -276,8 +267,18 @@ def base_search(
                 "flight_time": flight_time
             }
 
-        state_key = (current.x, current.y, current.direction[0], current.direction[1], getattr(current, 'straight_steps', 0)) if use_kinematics else (
-            current.x, current.y)
+        # Klucz odwiedzin – dla kinematyki uwzględniamy kubełek straight_dist,
+        # bo ten sam (x,y,dir) z większym straight_dist otwiera inne możliwości hamowania
+        if use_kinematics:
+            sd_current = getattr(current, 'straight_dist', 0.0)
+            state_key = (
+                current.x, current.y,
+                current.direction[0], current.direction[1],
+                _braking_bucket(sd_current)
+            )
+        else:
+            state_key = (current.x, current.y)
+
         if state_key in visited:
             continue
         visited.add(state_key)
@@ -296,18 +297,17 @@ def base_search(
             v1 = current.direction
             v2 = (dx, dy)
 
-            new_straight_steps = 0
             straight_dist = getattr(current, 'straight_dist', 0.0)
+            new_speed = current.speed
 
-            # ── MODEL ZAAWANSOWANY (Risk A*) ───────────────────────────────
+            # ── MODEL ZAAWANSOWANY (Risk A*) ──────────────────────────────
             if use_kinematics:
-                # Prędkość śledzona per-węzeł (nie liczona od nowa ze wzoru)
                 node_speed = current.speed
-                straight_steps = getattr(current, 'straight_steps', 100)
-                new_straight_steps = straight_steps + 1
 
                 # Domyślnie: lot na wprost – przyspieszenie do V_max
                 new_speed = min(V_MAX_MS, math.sqrt(node_speed ** 2 + 2 * ACCELERATION * dist_cost))
+                # straight_dist sąsiada = akumulacja jeśli idziemy prosto
+                new_straight_dist = straight_dist + dist_cost
 
                 if v1 != (0, 0) and v1 != v2:
                     dot_product = v1[0] * v2[0] + v1[1] * v2[1]
@@ -316,7 +316,7 @@ def base_search(
                     cos_theta = max(-1.0, min(1.0, dot_product / (mag1 * mag2)))
                     angle = math.acos(cos_theta)
 
-                    # ── HARD LIMIT: zawrócenie w locie (~180°) – fizycznie niemożliwe ──
+                    # HARD LIMIT: zawrócenie w locie (~180°) – fizycznie niemożliwe
                     if angle >= math.radians(170):
                         continue
 
@@ -327,45 +327,47 @@ def base_search(
 
                     braking_penalty = 0.0
                     if node_speed > v_safe_turn:
-                        # ── TWARDY LIMIT FIZYCZNY: droga hamowania ────────────────────
-                        # Dron musi móc wyhamować PRZED węzłem zakrętu.
-                        # Jeśli odcinek prosty jest za krótki – ruch odrzucamy (continue).
-                        # To zmusza planera do planowania szerszych łuków.
+                        available_braking_dist = straight_dist + dist_cost
                         braking_dist_needed = (node_speed ** 2 - v_safe_turn ** 2) / (2 * ACCELERATION)
-                        if braking_dist_needed > straight_dist:
+                        if braking_dist_needed > available_braking_dist:
                             continue  # Fizycznie niemożliwe – odrzuć tę krawędź
 
                         braking_penalty = (node_speed - v_safe_turn) / ACCELERATION
 
-                    # Po zakręcie dron leci z prędkością bezpieczną (wyhamował)
+                    # Po zakręcie: nowa prędkość = v_safe_turn
                     new_speed = v_safe_turn
-                    new_straight_steps = 0
                     turn_cost = turn_penalty * (angle / (math.pi / 2)) + braking_penalty
 
-            # ── MODEL KLASYCZNY (Dijkstra / A* Standard) ───────────────────
+                    new_straight_dist = 0.0
+
+            # ── MODEL KLASYCZNY (Dijkstra / A* Standard) ──────────────────
             else:
+                new_straight_dist = 0.0   # nieużywane, ale dla spójności
                 if current.parent is not None:
                     if v1 != (0, 0) and v1 != v2:
                         turn_cost = turn_penalty
 
             new_g = current.cost + dist_cost + static_risk_cost + turn_cost
-            neighbor_key = (nx, ny, dx, dy) if use_kinematics else (nx, ny)
+
+            # Spójny klucz g_score – 5-elementowy dla kinematyki
+            if use_kinematics:
+                neighbor_key = (nx, ny, dx, dy, _braking_bucket(new_straight_dist))
+            else:
+                neighbor_key = (nx, ny)
 
             if neighbor_key not in g_score or new_g < g_score[neighbor_key]:
                 g_score[neighbor_key] = new_g
 
                 h = 0.0
                 if use_heuristic:
-                    # Stałe mnożniki z config – uczciwe porównanie między algorytmami
                     multiplier = HEURISTIC_MULT_RISK if use_kinematics else HEURISTIC_MULT_ASTAR
                     h = math.sqrt((nx - goal[0]) ** 2 + (ny - goal[1]) ** 2) * multiplier
 
                 neighbor = Node(nx, ny, new_g, current, direction=(dx, dy), heuristic=h,
-                               speed=new_speed if use_kinematics else 0.0)
+                                speed=new_speed)
 
                 if use_kinematics:
-                    neighbor.straight_dist = dist_cost if turn_cost > 0.0 else straight_dist + dist_cost
-                    neighbor.straight_steps = new_straight_steps
+                    neighbor.straight_dist = new_straight_dist
 
                 heapq.heappush(open_list, neighbor)
 

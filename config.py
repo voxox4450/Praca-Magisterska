@@ -71,7 +71,7 @@ HEURISTIC_MULT_RISK:  float = 1.001    # Risk-Aware A*: silniejsze wzmocnienie (
 # ─────────────────────────────────────────────────────────────────────────────
 # BENCHMARK (Monte Carlo)
 # ─────────────────────────────────────────────────────────────────────────────
-N_TESTS: int = 5                # Liczba prób Monte Carlo (min. 20-30 dla istotności stat.)
+N_TESTS: int = 50                # Liczba prób Monte Carlo (min. 20-30 dla istotności stat.)
 
 # Wagi ryzyka używane w sweep Pareto (od 0 do 50, co 5)
 PARETO_WEIGHT_STEP: int = 5
