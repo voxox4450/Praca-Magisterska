@@ -187,7 +187,9 @@ def run_online_mode() -> None:
     )
     run_online_simulation(env, START_POS, GOAL_POS,
                           search_func=run_risk_astar,
-                          collision_radius=COLLISION_RADIUS)
+                          collision_radius=COLLISION_RADIUS,
+                          func_dijkstra=run_dijkstra,
+                          func_astar=run_astar)
 
 
 if __name__ == "__main__":

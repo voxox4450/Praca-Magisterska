@@ -13,7 +13,7 @@ from config import (
 
 
 BRAKING_BUCKET_SIZE: float = 5.0   # [kratki] – dokładność dyskretyzacji drogi hamowania
-_RAD_170: float = math.radians(170)  # [OPT] Prekomputowany próg zawracania
+_RAD_170: float = math.radians(160)  # [OPT] Prekomputowany próg zawracania
 
 
 def _braking_bucket(straight_dist: float) -> int:

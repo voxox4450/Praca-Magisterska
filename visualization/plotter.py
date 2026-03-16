@@ -17,7 +17,7 @@ from config import (
     V_MAX_MS, ACCELERATION, MAX_LATERAL_ACCEL, MIN_TURN_SPEED,
     RISK_WEIGHT, TURN_PENALTY,
     PARETO_WEIGHT_MAX, PARETO_WEIGHT_STEP,
-    COLLISION_RADIUS, SENSOR_RANGE  # [FIX #24] Import z config
+    COLLISION_RADIUS, SENSOR_RANGE
 )
 
 
@@ -331,23 +331,31 @@ def plot_interactive_risk(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TRYB ONLINE
-# [FIX #12] Bufor z is_collision
-# [FIX #15] Spójny return None
-# [FIX #21] Ryzyko liczone spójnie (pełna ścieżka, bez [:-1])
-# [FIX #24] SENSOR_RANGE z config
+# TRYB ONLINE — PORÓWNANIE 3 ALGORYTMÓW
+# Po kliknięciu przeszkody otwiera 3 okna:
+#   1. Risk-Aware A* (kinematyka) — hamuje, zwalnia, omija płynnie
+#   2. Dijkstra (brak kinematyki) — skręca 90° przy pełnej prędkości → rozpad
+#   3. A* Standard (brak kinematyki) — jak Dijkstra, ostry zakręt → rozpad
 # ─────────────────────────────────────────────────────────────────────────────
 def run_online_simulation(
         env: GridMap, start: Tuple[int, int], goal: Tuple[int, int],
-        search_func: Callable, collision_radius: float
+        search_func: Callable, collision_radius: float,
+        func_dijkstra: Callable = None,
+        func_astar: Callable = None
 ) -> None:
+    """
+    Tryb online z porównaniem 3 algorytmów.
+    search_func = Risk-Aware A* (główny planista z kinematyką).
+    func_dijkstra, func_astar = algorytmy referencyjne (bez kinematyki).
+    """
     path_global, stats_global = search_func(env, start, goal, risk_weight=RISK_WEIGHT,
                                             turn_penalty=TURN_PENALTY, drone_radius=collision_radius)
 
     if not path_global:
         print("Błąd: Nie znaleziono trasy startowej.")
-        return  # [FIX #15] return None
+        return
 
+    # ── OKNO GŁÓWNE: planowanie wstępne (Risk-Aware A*) ──────────────────
     fig, ax = plt.subplots(figsize=(12, 10))
     plt.subplots_adjust(bottom=0.18, right=0.80, left=0.15, top=0.90)
     setup_dark_theme(fig, ax)
@@ -467,7 +475,6 @@ def run_online_simulation(
                         last_dir = curr_dir
 
             t_time = sim_state["flown_time"] + calculate_kinematic_flight_time(full_new_path)
-            # [FIX #21] Spójne obliczanie ryzyka — pełna ścieżka (bez [:-1])
             t_risk = sim_state["flown_risk"] + calculate_segment_risk(full_new_path, env)
             t_turns = sim_state["flown_turns"] + f_turns
 
@@ -488,7 +495,7 @@ def run_online_simulation(
                 lc_new.set_cmap(LinearSegmentedColormap.from_list("Warn", ["orange", "yellow"]))
                 line_proxy.set_color('orange')
             else:
-                ax.set_title(f"Omijanie Przeszkody (W={w:.0f})\n{stats_text}", color='lime', fontsize=14, pad=25)
+                ax.set_title(f"Risk-Aware A* — Omijanie (W={w:.0f})\n{stats_text}", color='lime', fontsize=14, pad=25)
                 lc_new.set_cmap(get_speed_cmap())
                 line_proxy.set_color('cyan')
         else:
@@ -530,7 +537,6 @@ def run_online_simulation(
             fig.canvas.draw()
             return
 
-        # [FIX #24] SENSOR_RANGE z config
         collision_idx = -1
         for i, (px, py) in enumerate(path_global):
             if np.sqrt((px - click_x)**2 + (py - click_y)**2) <= SENSOR_RANGE:
@@ -569,7 +575,7 @@ def run_online_simulation(
         line_reaction.set_data([p[0] for p in reaction_path], [p[1] for p in reaction_path])
         drone_marker.set_data([path_global[drone_detect_idx][0]], [path_global[drone_detect_idx][1]])
 
-        # [FIX #12] Bufor pędu z pełnym is_collision
+        # Bufor pędu (hamowanie)
         buffer_points = []
         buffer_dist = 0.0
         if flight_heading != (0, 0):
@@ -612,7 +618,6 @@ def run_online_simulation(
         flown_full = path_global[:drone_react_idx + 1]
         sim_state["flown_dist"] = calculate_path_length(flown_full)
         sim_state["flown_time"] = calculate_kinematic_flight_time(flown_full)
-        # [FIX #21] Spójna metryka ryzyka — pełna ścieżka
         sim_state["flown_risk"] = calculate_segment_risk(flown_full, env)
 
         f_turns = 0
@@ -625,7 +630,7 @@ def run_online_simulation(
                     last_dir = curr_dir
         sim_state["flown_turns"] = f_turns
 
-        # Rysowanie drogi przebytej
+        # Rysowanie drogi przebytej na oknie głównym
         flown_raw = path_global[:drone_detect_idx + 1]
         f_speeds = global_speeds[:drone_detect_idx + 1]
         sx_f, sy_f, ss_f = smooth_path_with_speeds(flown_raw, f_speeds)
@@ -635,7 +640,7 @@ def run_online_simulation(
         lc_flown.set_segments(segs_f)
         lc_flown.set_array((ss_f[:-1] + ss_f[1:]) / 2.0)
 
-        # Sprawdzenie katastrofy
+        # Sprawdzenie katastrofy (na ścieżce reakcji)
         crash = any(
             np.sqrt((click_x - px)**2 + (click_y - py)**2) <= (OBSTACLE_RADIUS + DRONE_RADIUS)
             for px, py in reaction_path
@@ -650,6 +655,7 @@ def run_online_simulation(
 
         sim_state["clicked"] = True
 
+        # ── Risk-Aware A* — replanowanie na oknie głównym ────────────────
         search_start = sim_state["buffer_points"][-1] if sim_state.get("buffer_points") else sim_state["drone_pos"]
         path_check, _ = search_func(env, search_start, goal, risk_weight=RISK_WEIGHT,
                                     turn_penalty=TURN_PENALTY, drone_radius=collision_radius,
@@ -675,10 +681,178 @@ def run_online_simulation(
         base_len = calculate_path_length(path_remainder)
         generate_analysis_table(env=env, start_pos=sim_state["drone_pos"], target_pos=sim_state["target_pos"],
                                 search_func=search_func, base_len=base_len, base_risk=base_risk,
-                                collision_radius=collision_radius, table_title="ANALIZA TRYBU ONLINE (H4)")
+                                collision_radius=collision_radius, table_title="ANALIZA TRYBU ONLINE — Risk-Aware A*")
+
+        # ══════════════════════════════════════════════════════════════════
+        # OTWARCIE 2 DODATKOWYCH OKIEN: Dijkstra i A* Standard
+        # Te algorytmy NIE mają kinematyki — nie wiedzą o prędkości,
+        # nie hamują przed zakrętem. Efekt: ostry zakręt → rozpad drona.
+        # ══════════════════════════════════════════════════════════════════
+        if func_dijkstra is not None and func_astar is not None:
+            _open_comparison_windows(
+                env=env, start=start, goal=goal,
+                path_global=path_global, global_speeds=global_speeds,
+                click_x=click_x, click_y=click_y,
+                obstacle_radius=OBSTACLE_RADIUS,
+                drone_radius=DRONE_RADIUS,
+                collision_radius=collision_radius,
+                drone_detect_idx=drone_detect_idx,
+                drone_react_idx=drone_react_idx,
+                reaction_path=reaction_path,
+                current_drone_pos=current_drone_pos,
+                flight_heading=flight_heading,
+                v_detect=v_detect,
+                v_react_end=v_react_end,
+                func_dijkstra=func_dijkstra,
+                func_astar=func_astar,
+            )
+
+        fig.canvas.draw()
 
     fig.canvas.mpl_connect('button_press_event', onclick)
+
+    print("\n Kliknij na mapę aby dodać przeszkodę dynamiczną.")
+    print("   Po kliknięciu otworzą się 3 okna porównawcze.\n")
     plt.show(block=True)
+
+
+def _open_comparison_windows(
+        env, start, goal, path_global, global_speeds,
+        click_x, click_y, obstacle_radius, drone_radius,
+        collision_radius, drone_detect_idx, drone_react_idx,
+        reaction_path, current_drone_pos, flight_heading,
+        v_detect, v_react_end,
+        func_dijkstra, func_astar
+) -> None:
+    """
+    Otwiera 2 dodatkowe okna: Dijkstra i A* Standard.
+    Każde okno ma suwak Wagi Ryzyka (W) — analogicznie do Risk-Aware A*.
+    """
+
+    algorithms = [
+        ("Dijkstra", func_dijkstra, '#4472C4'),
+        ("A* Standard", func_astar, '#ED7D31'),
+    ]
+
+    for algo_name, algo_func, color in algorithms:
+
+        fig_cmp, ax_cmp = plt.subplots(figsize=(12, 10))
+        plt.subplots_adjust(bottom=0.18, right=0.80, left=0.10, top=0.88)
+        setup_dark_theme(fig_cmp, ax_cmp)
+
+        img_cmp = ax_cmp.imshow(env.grid.T, origin='lower', cmap=get_city_cmap(), vmin=0, vmax=1)
+        _setup_ui_colorbars(fig_cmp, ax_cmp, img_cmp,
+                            speed_axes_rect=[0.115, 0.13, 0.62, 0.02],
+                            risk_fraction=0.048, risk_pad=0.045, risk_shrink=0.72)
+
+        # Oryginalna trasa (szara przerywana)
+        gx_s, gy_s = smooth_path_bspline(path_global)
+        ax_cmp.plot(gx_s, gy_s, color='gray', linestyle='--', linewidth=2, alpha=0.5,
+                    label='Pierwotny Plan')
+
+        # Droga przebyta (do wykrycia)
+        flown_raw = path_global[:drone_detect_idx + 1]
+        f_speeds = global_speeds[:drone_detect_idx + 1]
+        if len(flown_raw) >= 2:
+            sx_f, sy_f, ss_f = smooth_path_with_speeds(flown_raw, f_speeds)
+            pts_f = np.array([sx_f, sy_f]).T.reshape(-1, 1, 2)
+            segs_f = np.concatenate([pts_f[:-1], pts_f[1:]], axis=1)
+            lc_f_bg = LineCollection(segs_f, colors='#555555', linewidths=7, alpha=0.4, zorder=3)
+            lc_f = LineCollection(segs_f, cmap=get_speed_cmap(), norm=plt.Normalize(0, V_MAX_MS),
+                                  linewidths=5, zorder=4)
+            lc_f.set_array((ss_f[:-1] + ss_f[1:]) / 2.0)
+            ax_cmp.add_collection(lc_f_bg)
+            ax_cmp.add_collection(lc_f)
+
+        # Czas reakcji (pomarańczowa)
+        ax_cmp.plot([p[0] for p in reaction_path], [p[1] for p in reaction_path],
+                    color='orange', linestyle=':', linewidth=4, label='Czas Reakcji', zorder=4)
+
+        # Punkt wykrycia
+        ax_cmp.plot([path_global[drone_detect_idx][0]], [path_global[drone_detect_idx][1]],
+                    'o', color='yellow', markersize=12, markeredgecolor='black', zorder=6,
+                    label='Punkt Wykrycia')
+
+        # Start i cel
+        ax_cmp.scatter([start[0]], [start[1]], color='lime', s=150, label='Start',
+                       edgecolors='black', zorder=5)
+        ax_cmp.scatter([goal[0]], [goal[1]], color='magenta', marker='X', s=150, label='Cel',
+                       edgecolors='black', zorder=5)
+
+        # Replanowana trasa (dynamiczna — zmienia się z suwakiem)
+        lc_n_bg = LineCollection([], colors='#555555', linewidths=7, alpha=0.4, zorder=4)
+        lc_n = LineCollection([], cmap=get_speed_cmap(), linewidths=5,
+                              norm=plt.Normalize(0, V_MAX_MS), zorder=5)
+        ax_cmp.add_collection(lc_n_bg)
+        ax_cmp.add_collection(lc_n)
+
+        ax_cmp.plot([], [], color='cyan', linewidth=5, label='Replanowana Trasa',
+                    path_effects=[pe.withStroke(linewidth=7, foreground="#555555")])
+
+        legend_cmp = ax_cmp.legend(loc='lower left', bbox_to_anchor=(1.04, -0.01),
+                                    facecolor='#333333', edgecolor='white',
+                                    title=algo_name)
+        plt.setp(legend_cmp.get_texts(), color='white')
+        plt.setp(legend_cmp.get_title(), color='white')
+
+        # Suwak Wagi Ryzyka
+        ax_slider_cmp = plt.axes([0.10, 0.04, 0.65, 0.04], facecolor='#333333')
+        slider_cmp = Slider(ax=ax_slider_cmp, label='Waga Ryzyka (W) ',
+                            valmin=0.0, valmax=40.0, valinit=RISK_WEIGHT, valstep=1.0,
+                            color=color)
+        slider_cmp.label.set_color('white')
+        slider_cmp.valtext.set_color('white')
+
+        def make_update(ax_ref, lc_bg_ref, lc_ref, func_ref, name_ref, clr_ref):
+            def update_cmp(val):
+                w = val
+                path_replan, stats_replan = func_ref(
+                    env, current_drone_pos, goal,
+                    risk_weight=w,
+                    turn_penalty=TURN_PENALTY,
+                    drone_radius=collision_radius,
+                    initial_direction=flight_heading,
+                    current_speed=0.0
+                )
+
+                if path_replan and stats_replan['found']:
+                    speeds_r = compute_path_speeds(path_replan, initial_speed=v_react_end)
+                    sx_r, sy_r, ss_r = smooth_path_with_speeds(path_replan, speeds_r)
+                    pts_r = np.array([sx_r, sy_r]).T.reshape(-1, 1, 2)
+                    segs_r = np.concatenate([pts_r[:-1], pts_r[1:]], axis=1)
+
+                    lc_bg_ref.set_segments(segs_r)
+                    lc_ref.set_segments(segs_r)
+                    lc_ref.set_array((ss_r[:-1] + ss_r[1:]) / 2.0)
+
+                    flight_time = calculate_kinematic_flight_time(path_replan)
+                    title = (
+                        f"{name_ref} — Replanowanie (W={w:.0f})\n"
+                        f"Dystans: {stats_replan['length']:.1f} m | "
+                        f"Czas lotu: {flight_time:.1f} s | "
+                        f"Ryzyko: {stats_replan['risk']:.1f} | "
+                        f"Zakręty: {stats_replan.get('turns', 0)}"
+                    )
+                    ax_ref.set_title(title, fontsize=13, color=clr_ref, pad=20)
+                else:
+                    lc_bg_ref.set_segments([])
+                    lc_ref.set_segments([])
+                    ax_ref.set_title(f"{name_ref} — BRAK TRASY (W={w:.0f})",
+                                     fontsize=13, color='red', pad=20)
+
+                ax_ref.figure.canvas.draw_idle()
+            return update_cmp
+
+        update_fn = make_update(ax_cmp, lc_n_bg, lc_n, algo_func, algo_name, color)
+        slider_cmp.on_changed(update_fn)
+
+        # Początkowe rysowanie z domyślnym W
+        update_fn(RISK_WEIGHT)
+
+        fig_cmp.canvas.manager.set_window_title(algo_name)
+        # Zachowaj referencję suwaka (inaczej garbage collector go usunie)
+        fig_cmp._slider_ref = slider_cmp
+        plt.show(block=False)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
