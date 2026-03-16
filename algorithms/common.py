@@ -8,12 +8,22 @@ from config import (
     DRONE_MASS_KG, MAX_THRUST_NET_N,
     HEURISTIC_MULT_ASTAR, HEURISTIC_MULT_RISK,
     RISK_WEIGHT, TURN_PENALTY, COLLISION_RADIUS,
-    TURN_RADIUS_CONST
+    TURN_RADIUS_CONST, SAFE_MARGIN_M
 )
 
 
 BRAKING_BUCKET_SIZE: float = 5.0   # [kratki] – dokładność dyskretyzacji drogi hamowania
-_RAD_170: float = math.radians(160)  # [OPT] Prekomputowany próg zawracania
+_RAD_170: float = math.radians(170)  # [OPT] Prekomputowany próg zawracania
+
+
+def drone_radius_for_mass(mass: float) -> float:
+    """Promień fizyczny drona: r = 1.0 * sqrt(m / 30)."""
+    return 1.0 * math.sqrt(mass / 30.0)
+
+
+def collision_radius_for_mass(mass: float) -> float:
+    """Promień kolizji = promień fizyczny + margines bezpieczeństwa."""
+    return drone_radius_for_mass(mass) + SAFE_MARGIN_M
 
 
 def _braking_bucket(straight_dist: float) -> int:
@@ -346,9 +356,14 @@ def base_search(
         current_speed: float = 0.0,
         use_heuristic: bool = True,
         use_kinematics: bool = False,
-        initial_straight_dist: float = 0.0
+        initial_straight_dist: float = 0.0,
+        drone_mass: float = DRONE_MASS_KG
 ) -> Tuple[List[Tuple[int, int]], Dict[str, Any]]:
     t0 = time.time()
+
+    # Przyspieszenie zależne od masy (cięższy dron → wolniej hamuje)
+    accel = MAX_THRUST_NET_N / drone_mass
+
     start_node = Node(start[0], start[1], 0.0, direction=initial_direction, speed=current_speed)
 
     # [FIX #32] WSZYSTKIE algorytmy śledzą straight_dist → identyczny format klucza.
@@ -436,7 +451,7 @@ def base_search(
             if use_kinematics:
                 node_speed = cur_speed
 
-                new_speed = min(V_MAX_MS, math.sqrt(node_speed * node_speed + 2.0 * ACCELERATION * dist_cost))
+                new_speed = min(V_MAX_MS, math.sqrt(node_speed * node_speed + 2.0 * accel * dist_cost))
                 new_straight_dist = straight_dist + dist_cost
 
                 if v1 != (0, 0) and v1 != v2:
@@ -450,7 +465,7 @@ def base_search(
                     braking_penalty = 0.0
                     if node_speed > v_safe_turn:
                         available_braking_dist = straight_dist + dist_cost
-                        braking_dist_needed = (node_speed * node_speed - v_safe_turn * v_safe_turn) / (2.0 * ACCELERATION)
+                        braking_dist_needed = (node_speed * node_speed - v_safe_turn * v_safe_turn) / (2.0 * accel)
                         if braking_dist_needed > available_braking_dist:
                             continue
 
