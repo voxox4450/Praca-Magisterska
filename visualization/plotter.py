@@ -22,7 +22,7 @@ from config import (
 
 
 def _plot_benchmark_bars(bench_data: dict, title: str, filename: str, w_label: str) -> None:
-    """Funkcja pomocnicza do rysowania 4 wykresów słupkowych (bez std dev)."""
+    """Funkcja pomocnicza do rysowania 4 wykresów słupkowych."""
     labels = [f'Dijkstra\n({w_label})', f'A* Standard\n({w_label})', f'Risk-Aware A*\n({w_label})']
     colors = ['#4472C4', '#ED7D31', '#70AD47']
 
@@ -58,7 +58,7 @@ def _plot_benchmark_bars(bench_data: dict, title: str, filename: str, w_label: s
             ax.text(i, v + (max_v * 0.02), f"{v:.1f}", ha='center', va='bottom', fontweight='bold', fontsize=11)
 
     plt.tight_layout(rect=[0, 0, 1, 0.96])
-    plt.savefig(filename, dpi=300, bbox_inches='tight')
+    plt.savefig(filename, dpi=150, bbox_inches='tight')
     plt.close(fig)
 
 
@@ -294,7 +294,7 @@ def plot_interactive_risk(
     plt.setp(legend.get_title(), color='white')
 
     ax_slider = plt.axes([0.15, 0.04, 0.70, 0.04], facecolor='#333333')
-    risk_slider = Slider(ax=ax_slider, label='Waga Ryzyka (W)', valmin=0.0, valmax=100.0,
+    risk_slider = Slider(ax=ax_slider, label='Waga Ryzyka (W)', valmin=0.0, valmax=40.0,
                          valinit=RISK_WEIGHT, valstep=1.0, color='cyan')
     risk_slider.label.set_color('white')
     risk_slider.valtext.set_color('white')
@@ -398,7 +398,7 @@ def run_online_simulation(
     plt.setp(legend.get_title(), color='white')
 
     ax_slider = plt.axes([0.15, 0.04, 0.60, 0.04], facecolor='#333333')
-    risk_slider = Slider(ax=ax_slider, label='Waga Ryzyka (W) ', valmin=0.0, valmax=100.0,
+    risk_slider = Slider(ax=ax_slider, label='Waga Ryzyka (W) ', valmin=0.0, valmax=40.0,
                          valinit=RISK_WEIGHT, valstep=1.0, color='cyan')
     risk_slider.label.set_color('white')
     risk_slider.valtext.set_color('white')
@@ -415,7 +415,7 @@ def run_online_simulation(
         if not sim_state["clicked"] or sim_state["mode"] in ["CRASH", "IGNORE", "IDLE"]:
             return
 
-        w = 50.0 if sim_state["mode"] == "RTH" else risk_slider.val
+        w = 40.0 if sim_state["mode"] == "RTH" else risk_slider.val
         search_start = sim_state["buffer_points"][-1] if sim_state.get("buffer_points") else sim_state["drone_pos"]
 
         path_local, stats = search_func(env, search_start, sim_state["target_pos"], risk_weight=w,
@@ -665,7 +665,7 @@ def run_online_simulation(
             sim_state["mode"] = "RTH"
             goal_marker.set_facecolor('gray')
             line_proxy.set_label('Powrót (Awaryjny)')
-            risk_slider.set_val(50.0)
+            risk_slider.set_val(40.0)
 
         if sim_state["mode"] == "NORMAL":
             update_route(risk_slider.val)
@@ -747,14 +747,8 @@ def generate_thesis_charts(
     ))
     print(f"Początkowa liczba map: {len(envs)}")
 
-    # KROK 1: Wstępna selekcja map
-    valid_envs = []
-    for env in envs:
-        _, sd = func_dijkstra(env, start, goal, risk_weight=0.0, turn_penalty=0.0, drone_radius=collision_radius)
-        _, sa = func_astar(env, start, goal, risk_weight=0.0, turn_penalty=0.0, drone_radius=collision_radius)
-        _, sr = func_risk_astar(env, start, goal, risk_weight=0.0, turn_penalty=0.0, drone_radius=collision_radius)
-        if sd['found'] and sa['found'] and sr['found']:
-            valid_envs.append(env)
+    # [OPT] Mapy już zwalidowane w run_batch_benchmark() — nie powtarzamy.
+    valid_envs = envs
 
     print(f"Rozwiązywalnych map: {len(valid_envs)}")
     if len(valid_envs) == 0:
@@ -877,7 +871,7 @@ def generate_thesis_charts(
     ax1.grid(True, linestyle='--', alpha=0.7)
     ax1.legend(fontsize=12)
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "1_pareto_3_algorithms.png"), dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(output_dir, "1_pareto_3_algorithms.png"), dpi=150, bbox_inches='tight')
     plt.close(fig1)
 
     # WYKRES 2: Wydajność
@@ -899,7 +893,7 @@ def generate_thesis_charts(
 
     plt.suptitle("Analiza Wydajności Obliczeniowej", fontsize=15)
     plt.tight_layout()
-    plt.savefig(os.path.join(output_dir, "2_performance_metrics.png"), dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(output_dir, "2_performance_metrics.png"), dpi=150, bbox_inches='tight')
     plt.close(fig2)
 
     # WYKRES 3: Słupki W=0
@@ -944,7 +938,7 @@ def generate_thesis_charts(
         fig_adv.suptitle(f"Zaawansowane Wskaźniki Jakości (W={int(RISK_WEIGHT)})", fontsize=16, fontweight='bold')
         plt.tight_layout()
         fig_adv.subplots_adjust(top=0.85)
-        fig_adv.savefig(os.path.join(output_dir, "5_advanced_metrics_W20.png"), dpi=300, bbox_inches='tight')
+        fig_adv.savefig(os.path.join(output_dir, "5_advanced_metrics_W20.png"), dpi=150, bbox_inches='tight')
         plt.close(fig_adv)
 
     print("Gotowe! Wykresy:", output_dir)

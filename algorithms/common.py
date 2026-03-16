@@ -13,6 +13,7 @@ from config import (
 
 
 BRAKING_BUCKET_SIZE: float = 5.0   # [kratki] – dokładność dyskretyzacji drogi hamowania
+_RAD_170: float = math.radians(170)  # [OPT] Prekomputowany próg zawracania
 
 
 def _braking_bucket(straight_dist: float) -> int:
@@ -21,6 +22,8 @@ def _braking_bucket(straight_dist: float) -> int:
 
 
 class Node:
+    __slots__ = ('x', 'y', 'cost', 'parent', 'direction', 'heuristic', 'speed', 'straight_dist')
+
     def __init__(self, x: int, y: int, cost: float, parent: Optional['Node'] = None,
                  direction: Tuple[int, int] = (0, 0), heuristic: float = 0.0,
                  speed: float = 0.0) -> None:
@@ -31,6 +34,7 @@ class Node:
         self.direction = direction
         self.heuristic = heuristic
         self.speed = speed
+        self.straight_dist = 0.0
 
     @property
     def total_cost(self) -> float:
@@ -276,11 +280,61 @@ def calculate_kinematic_flight_time(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# [FIX #29] Dekompozycja kosztów ścieżki — diagnostyka post-hoc.
+# Oblicza DOKŁADNIE te same składniki, co base_search() na ścieżce wynikowej.
+# Pozwala zweryfikować: g_cost ≈ cost_dist + cost_risk + cost_turn
+# (nierówność wynika z braking_penalty w trybie kinematycznym)
+# ─────────────────────────────────────────────────────────────────────────────
+def decompose_path_costs(
+        path: List[Tuple[int, int]],
+        grid_map: GridMap,
+        risk_weight: float,
+        turn_penalty: float
+) -> Dict[str, float]:
+    """
+    Rozkłada koszt ścieżki na 3 składniki: dystans, ryzyko, zakręty.
+    Zwraca dict z kluczami 'dist', 'risk', 'turn'.
+    """
+    cost_dist = 0.0
+    cost_risk = 0.0
+    cost_turn = 0.0
+    last_dir = None
+
+    for i in range(1, len(path)):
+        dx = path[i][0] - path[i - 1][0]
+        dy = path[i][1] - path[i - 1][1]
+        curr_dir = (dx, dy)
+
+        dist = math.sqrt(dx ** 2 + dy ** 2)
+        cost_dist += dist
+
+        cell_risk = grid_map.get_cost(path[i][0], path[i][1])
+        if cell_risk < 1.0:
+            cost_risk += cell_risk * risk_weight
+
+        if last_dir is not None and last_dir != (0, 0) and last_dir != curr_dir:
+            tc, _ = compute_turn_cost(last_dir, curr_dir, turn_penalty)
+            cost_turn += tc
+
+        last_dir = curr_dir
+
+    return {'dist': cost_dist, 'risk': cost_risk, 'turn': cost_turn}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # GŁÓWNA FUNKCJA PRZESZUKIWANIA
 # [FIX #2, #5]  Ujednolicona proporcjonalna formuła kary dla wszystkich algo
 # [FIX #16]     braking_penalty w jednostkach dystansu (nie czasu)
-# [FIX #22]     Zwraca rzeczywisty czas obliczeń przy braku trasy
+# [FIX #32]     Identyczny format klucza stanu (x,y,dx,dy,bucket)
+# [OPT]         collision_mask, bezpośredni dostęp do grid, prekomp. dystanse
 # ─────────────────────────────────────────────────────────────────────────────
+
+# [OPT] Prekomputowane dystanse dla 8 kierunków — unika math.sqrt w pętli
+_SQRT2 = math.sqrt(2)
+_NEIGHBORS = [(-1, 0, 1.0), (1, 0, 1.0), (0, -1, 1.0), (0, 1, 1.0),
+              (-1, -1, _SQRT2), (-1, 1, _SQRT2), (1, -1, _SQRT2), (1, 1, _SQRT2)]
+
+
 def base_search(
         grid_map: GridMap,
         start: Tuple[int, int],
@@ -297,117 +351,131 @@ def base_search(
     t0 = time.time()
     start_node = Node(start[0], start[1], 0.0, direction=initial_direction, speed=current_speed)
 
-    if use_kinematics:
-        start_node.straight_dist = initial_straight_dist
+    # [FIX #32] WSZYSTKIE algorytmy śledzą straight_dist → identyczny format klucza.
+    start_node.straight_dist = initial_straight_dist
 
     open_list = []
     heapq.heappush(open_list, start_node)
 
-    if use_kinematics:
-        init_bucket = _braking_bucket(initial_straight_dist)
-        g_score: dict = {
-            (start[0], start[1], initial_direction[0], initial_direction[1], init_bucket): 0.0
-        }
-    else:
-        g_score = {(start[0], start[1]): 0.0}
+    # [FIX #32] Format klucza: (x, y, dx, dy, bucket) dla WSZYSTKICH algorytmów.
+    # [OPT] Dijkstra/A* nie korzystają z bucket do kosztów, więc bucket=0 zawsze.
+    # Risk-Aware A* używa rzeczywistego kubełka.
+    # Format identyczny → ta sama struktura grafu, ale Dijkstra/A* nie marnują
+    # czasu na eksplorację identycznych stanów z różnymi kubełkami.
+    init_bucket = _braking_bucket(initial_straight_dist) if use_kinematics else 0
+    g_score: dict = {
+        (start[0], start[1], initial_direction[0], initial_direction[1], init_bucket): 0.0
+    }
 
     visited: set = set()
     nodes_expanded = 0
+
+    # [OPT] Lokalne referencje — unika wielokrotnego rozwiązywania atrybutów
+    collision_mask = grid_map.collision_mask
+    grid = grid_map.grid
+    goal_x, goal_y = goal
 
     while open_list:
         current = heapq.heappop(open_list)
         nodes_expanded += 1
 
-        if (current.x, current.y) == goal:
+        if current.x == goal_x and current.y == goal_y:
             execution_time = time.time() - t0
             path, length, total_risk, turns = reconstruct_path(current, grid_map)
             flight_time = calculate_kinematic_flight_time(path)
 
+            decomposed = decompose_path_costs(path, grid_map, risk_weight, turn_penalty)
+
             return path, {
                 "found": True, "time": execution_time, "length": length,
                 "risk": total_risk, "turns": turns, "nodes": nodes_expanded,
-                "flight_time": flight_time
+                "flight_time": flight_time,
+                "g_cost": current.cost,
+                "cost_dist": decomposed['dist'],
+                "cost_risk": decomposed['risk'],
+                "cost_turn": decomposed['turn'],
             }
 
+        # [FIX #32] Ujednolicony format klucza stanu
+        sd_current = current.straight_dist
         if use_kinematics:
-            sd_current = getattr(current, 'straight_dist', 0.0)
-            state_key = (
-                current.x, current.y,
-                current.direction[0], current.direction[1],
-                _braking_bucket(sd_current)
-            )
+            bucket = _braking_bucket(sd_current)
         else:
-            state_key = (current.x, current.y)
+            bucket = 0
+
+        state_key = (current.x, current.y,
+                     current.direction[0], current.direction[1], bucket)
 
         if state_key in visited:
             continue
         visited.add(state_key)
 
-        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]:
-            nx, ny = current.x + dx, current.y + dy
+        cx, cy = current.x, current.y
+        v1 = current.direction
+        cur_cost = current.cost
+        cur_speed = current.speed
+        straight_dist = sd_current
 
-            if grid_map.is_collision(nx, ny, drone_radius=drone_radius):
+        # [OPT] Prekomputowane dystanse, collision_mask zamiast is_collision()
+        for dx, dy, dist_cost in _NEIGHBORS:
+            nx, ny = cx + dx, cy + dy
+
+            # [OPT] Bezpośredni odczyt z numpy bool array — bez wywołania funkcji
+            if collision_mask[nx, ny]:
                 continue
 
-            cell_risk = grid_map.get_cost(nx, ny)
+            # [OPT] Bezpośredni dostęp do tablicy zamiast get_cost()
+            cell_risk = grid[nx, ny]
             static_risk_cost = cell_risk * risk_weight
-            dist_cost = math.sqrt(dx ** 2 + dy ** 2)
 
             turn_cost = 0.0
-            v1 = current.direction
             v2 = (dx, dy)
+            new_speed = cur_speed
 
-            straight_dist = getattr(current, 'straight_dist', 0.0)
-            new_speed = current.speed
-
-            # ── MODEL ZAAWANSOWANY (Risk-Aware A*) ────────────────────────
+            # ── MODEL ZAAWANSOWANY (Risk-Aware A* / A*-KIN) ───────────────
             if use_kinematics:
-                node_speed = current.speed
+                node_speed = cur_speed
 
-                new_speed = min(V_MAX_MS, math.sqrt(node_speed ** 2 + 2 * ACCELERATION * dist_cost))
+                new_speed = min(V_MAX_MS, math.sqrt(node_speed * node_speed + 2.0 * ACCELERATION * dist_cost))
                 new_straight_dist = straight_dist + dist_cost
 
                 if v1 != (0, 0) and v1 != v2:
-                    # [FIX #2] Kąt obliczany wspólną funkcją
                     base_turn_cost, angle = compute_turn_cost(v1, v2, turn_penalty)
 
-                    # HARD LIMIT: zawrócenie (~180°) — fizycznie niemożliwe
-                    if angle >= math.radians(170):
+                    if angle >= _RAD_170:
                         continue
 
-                    # [FIX #18] Promień z udokumentowanej funkcji
                     v_safe_turn = compute_safe_turn_speed(angle)
 
-                    # [FIX #16] braking_penalty wyrażone w DYSTANSIE [kratki=metry],
-                    # spójne z dist_cost i turn_cost.
-                    # Fizyczny sens: dodatkowa droga „utracona" na hamowanie.
                     braking_penalty = 0.0
                     if node_speed > v_safe_turn:
                         available_braking_dist = straight_dist + dist_cost
-                        braking_dist_needed = (node_speed ** 2 - v_safe_turn ** 2) / (2 * ACCELERATION)
+                        braking_dist_needed = (node_speed * node_speed - v_safe_turn * v_safe_turn) / (2.0 * ACCELERATION)
                         if braking_dist_needed > available_braking_dist:
-                            continue  # Fizycznie niemożliwe
+                            continue
 
-                        braking_penalty = braking_dist_needed  # [FIX #16] dystans, nie czas
+                        braking_penalty = braking_dist_needed
 
                     new_speed = v_safe_turn
                     turn_cost = base_turn_cost + braking_penalty
                     new_straight_dist = 0.0
 
+                new_bucket = _braking_bucket(new_straight_dist)
+
             # ── MODEL KLASYCZNY (Dijkstra / A* Standard) ──────────────────
-            # [FIX #2, #5] Ta sama formuła proporcjonalna do kąta
             else:
-                new_straight_dist = 0.0
-                if current.parent is not None:
+                new_straight_dist = straight_dist + dist_cost
+                if v1 != (0, 0) and v1 != v2:
                     base_turn_cost, angle = compute_turn_cost(v1, v2, turn_penalty)
                     turn_cost = base_turn_cost
+                    new_straight_dist = 0.0
 
-            new_g = current.cost + dist_cost + static_risk_cost + turn_cost
+                # [OPT] Bucket zawsze 0 — ten sam format klucza, brak duplikatów
+                new_bucket = 0
 
-            if use_kinematics:
-                neighbor_key = (nx, ny, dx, dy, _braking_bucket(new_straight_dist))
-            else:
-                neighbor_key = (nx, ny)
+            new_g = cur_cost + dist_cost + static_risk_cost + turn_cost
+
+            neighbor_key = (nx, ny, dx, dy, new_bucket)
 
             if neighbor_key not in g_score or new_g < g_score[neighbor_key]:
                 g_score[neighbor_key] = new_g
@@ -415,18 +483,18 @@ def base_search(
                 h = 0.0
                 if use_heuristic:
                     multiplier = HEURISTIC_MULT_RISK if use_kinematics else HEURISTIC_MULT_ASTAR
-                    h = math.sqrt((nx - goal[0]) ** 2 + (ny - goal[1]) ** 2) * multiplier
+                    h = math.sqrt((nx - goal_x) ** 2 + (ny - goal_y) ** 2) * multiplier
 
-                neighbor = Node(nx, ny, new_g, current, direction=(dx, dy), heuristic=h,
+                neighbor = Node(nx, ny, new_g, current, direction=v2, heuristic=h,
                                 speed=new_speed)
 
-                if use_kinematics:
-                    neighbor.straight_dist = new_straight_dist
+                neighbor.straight_dist = new_straight_dist
 
                 heapq.heappush(open_list, neighbor)
 
     execution_time = time.time() - t0
     return [], {
         "found": False, "time": execution_time, "length": 0, "risk": 0,
-        "turns": 0, "nodes": nodes_expanded, "flight_time": 0
+        "turns": 0, "nodes": nodes_expanded, "flight_time": 0,
+        "g_cost": 0, "cost_dist": 0, "cost_risk": 0, "cost_turn": 0
     }

@@ -23,15 +23,54 @@ class GridMap:
         self.dist_matrix = np.zeros((width, height), dtype=np.float64)
         self.dynamic_obstacles: List[Tuple[int, int, int]] = []
 
+        # [OPT] Prekomputowana maska kolizji — bool numpy array.
+        # Eliminuje wywołanie is_collision() (Python function call) per sąsiad.
+        self.collision_mask = np.ones((width, height), dtype=bool)
+
         self._generate_urban_layout(obstacle_density, start_pos, goal_pos)
         self._generate_soft_risk_zones(risk_zones_count, start_pos, goal_pos)
 
-    # [FIX #7] Wyodrębniona metoda — wywoływana po każdej zmianie budynków/przeszkód
+        # [OPT] Maska budowana RAZ po pełnej konstrukcji mapy
+        self._recompute_collision_mask(COLLISION_RADIUS)
+
     def _recompute_dist_matrix(self) -> None:
         """Przelicza macierz euklidesowych odległości od najbliższego budynku (grid==1.0)."""
         walls = (self.grid == 1.0).astype(float)
         inverted_grid = 1.0 - walls
         self.dist_matrix = distance_transform_edt(inverted_grid)
+
+    # [OPT] Wektorowa maska kolizji — zastępuje is_collision() w pętli przeszukiwania.
+    # Obliczana raz O(W×H), zamiast per-sąsiad O(nodes×8).
+    def _recompute_collision_mask(self, drone_radius: float = COLLISION_RADIUS) -> None:
+        """Przelicza boolowską maskę kolizji na podstawie dist_matrix i grid."""
+        w, h = self.width, self.height
+        physical_margin = 1
+
+        mask = np.ones((w, h), dtype=bool)  # True = kolizja
+
+        interior = np.zeros((w, h), dtype=bool)
+        interior[physical_margin:w - physical_margin, physical_margin:h - physical_margin] = True
+
+        safe = (
+            interior
+            & (self.dist_matrix > drone_radius)
+            & (self.grid < COLLISION_GRID_THRESHOLD)
+        )
+        mask[safe] = False
+
+        for (ox, oy, r) in self.dynamic_obstacles:
+            x_min = max(0, ox - int(r + drone_radius) - 1)
+            x_max = min(w, ox + int(r + drone_radius) + 2)
+            y_min = max(0, oy - int(r + drone_radius) - 1)
+            y_max = min(h, oy + int(r + drone_radius) + 2)
+
+            xs = np.arange(x_min, x_max)
+            ys = np.arange(y_min, y_max)
+            xx, yy = np.meshgrid(xs, ys, indexing='ij')
+            dist_sq = (xx - ox) ** 2 + (yy - oy) ** 2
+            mask[x_min:x_max, y_min:y_max] |= (dist_sq <= (r + drone_radius) ** 2)
+
+        self.collision_mask = mask
 
     def _generate_urban_layout(self, density: float, start_pos, goal_pos) -> None:
         total_pixels = self.width * self.height
@@ -62,12 +101,10 @@ class GridMap:
                 if random.random() > 0.3:
                     continue
 
-            # [FIX #20] Liczymy TYLKO nowo pokryte piksele (te, które wcześniej nie były budynkiem)
             new_pixels = int(np.sum(region < 1.0))
             self.grid[x:x + w, y:y + h] = 1.0
             current_pixels += new_pixels
 
-        # [FIX #7] Centralne przeliczenie dist_matrix
         self._recompute_dist_matrix()
 
         risk_gradient = np.exp(-self.dist_matrix / GRADIENT_DECAY)
@@ -83,16 +120,13 @@ class GridMap:
             return float(self.grid[x, y])
         return 1.0
 
-    # [FIX #8] Usunięto *1.41 — EDT zwraca odległość euklidesową,
-    # więc porównanie z drone_radius jest poprawne bez korekty.
-    # [FIX #6] Próg kolizji z config (COLLISION_GRID_THRESHOLD)
     def is_collision(self, x, y, drone_radius: float = COLLISION_RADIUS) -> bool:
+        """Fallback dla trybu online i kompatybilności wstecznej."""
         physical_margin = 1
         if not (physical_margin <= x < self.width - physical_margin
                 and physical_margin <= y < self.height - physical_margin):
             return True
 
-        # EDT dist_matrix jest euklidesowa → bezpośrednie porównanie z promieniem
         if self.dist_matrix[x, y] <= drone_radius:
             return True
 
@@ -106,12 +140,8 @@ class GridMap:
 
         return False
 
-    # [FIX #7] Dynamiczna przeszkoda przelicza dist_matrix
+    # [OPT] Wektoryzacja dynamicznej strefy ryzyka
     def add_dynamic_risk_zone(self, cx: int, cy: int, radius: int = 10) -> None:
-        """
-        Dodaje strefę dynamiczną logicznie (do listy) i wizualnie (gradient na mapie).
-        Przelicza dist_matrix aby is_collision() uwzględniała nową przeszkodę.
-        """
         self.dynamic_obstacles.append((cx, cy, radius))
 
         total_radius = radius + GRADIENT_RANGE
@@ -121,23 +151,29 @@ class GridMap:
         y_min = max(0, cy - total_radius)
         y_max = min(self.height, cy + total_radius)
 
-        for x in range(x_min, x_max):
-            for y in range(y_min, y_max):
-                dist = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
+        xs = np.arange(x_min, x_max)
+        ys = np.arange(y_min, y_max)
+        xx, yy = np.meshgrid(xs, ys, indexing='ij')
+        dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
 
-                if dist <= radius:
-                    if self.grid[x, y] < 1.0:
-                        self.grid[x, y] = 0.95
-                elif dist <= total_radius:
-                    dist_from_edge = dist - radius
-                    risk_val = np.exp(-dist_from_edge / GRADIENT_DECAY)
-                    risk_val = np.clip(risk_val, 0.0, 0.94)
-                    if self.grid[x, y] < 1.0:
-                        self.grid[x, y] = max(self.grid[x, y], risk_val)
+        region = self.grid[x_min:x_max, y_min:y_max]
+        not_wall = region < 1.0
 
-        # [FIX #7] Przelicz macierz odległości po dodaniu przeszkody
+        core_mask = (dist <= radius) & not_wall
+        region[core_mask] = 0.95
+
+        gradient_mask = (dist > radius) & (dist <= total_radius) & not_wall
+        dist_from_edge = dist - radius
+        risk_val = np.exp(-dist_from_edge / GRADIENT_DECAY)
+        risk_val = np.clip(risk_val, 0.0, 0.94)
+        region[gradient_mask] = np.maximum(region[gradient_mask], risk_val[gradient_mask])
+
+        self.grid[x_min:x_max, y_min:y_max] = region
+
         self._recompute_dist_matrix()
+        self._recompute_collision_mask(COLLISION_RADIUS)
 
+    # [OPT] Wektoryzacja stref ryzyka — meshgrid zamiast pętli Python
     def _generate_soft_risk_zones(self, num_zones: int, start_pos: Tuple[int, int],
                                    goal_pos: Tuple[int, int]) -> None:
         import math
@@ -185,21 +221,26 @@ class GridMap:
             if dist_start < max_r + 5 or dist_goal < max_r + 5:
                 continue
 
-            for x in range(x_min, x_max):
-                for y in range(y_min, y_max):
-                    if shape == 'circle':
-                        dist = np.sqrt((x - cx) ** 2 + (y - cy) ** 2)
-                        if dist <= r:
-                            risk_val = peak_risk * (1.0 - (dist / r))
-                            # [FIX #6] Jawne użycie SOFT_RISK_CAP
-                            self.grid[x, y] = min(SOFT_RISK_CAP, self.grid[x, y] + risk_val)
-                    else:
-                        dx = min(x - x_min, x_max - x - 1)
-                        dy = min(y - y_min, y_max - y - 1)
-                        dist_to_edge = min(dx, dy)
-                        max_dist = min((x_max - x_min) / 2.0, (y_max - y_min) / 2.0)
-                        if max_dist > 0:
-                            risk_val = peak_risk * (dist_to_edge / max_dist)
-                            self.grid[x, y] = min(SOFT_RISK_CAP, self.grid[x, y] + risk_val)
+            # [OPT] Wektoryzacja — meshgrid zamiast podwójnej pętli for
+            xs = np.arange(x_min, x_max)
+            ys = np.arange(y_min, y_max)
+            xx, yy = np.meshgrid(xs, ys, indexing='ij')
 
+            if shape == 'circle':
+                dist = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+                inside = dist <= r
+                risk_val = peak_risk * (1.0 - (dist / r))
+                risk_val = np.clip(risk_val, 0.0, peak_risk)
+                new_grid = np.minimum(SOFT_RISK_CAP, region + risk_val)
+                region[inside] = new_grid[inside]
+            else:
+                dx_arr = np.minimum(xx - x_min, x_max - xx - 1)
+                dy_arr = np.minimum(yy - y_min, y_max - yy - 1)
+                dist_to_edge = np.minimum(dx_arr, dy_arr).astype(float)
+                max_dist = min((x_max - x_min) / 2.0, (y_max - y_min) / 2.0)
+                if max_dist > 0:
+                    risk_val = peak_risk * (dist_to_edge / max_dist)
+                    region[:] = np.minimum(SOFT_RISK_CAP, region + risk_val)
+
+            self.grid[x_min:x_max, y_min:y_max] = region
             zones_placed += 1

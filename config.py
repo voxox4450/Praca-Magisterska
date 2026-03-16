@@ -14,7 +14,6 @@ RANDOM_SEED: int = 42                # Ziarno losowości (dla reprodukowalności
 START_POS = (5, 5)                   # Pozycja startowa drona
 GOAL_POS  = (195, 195)               # Pozycja docelowa drona
 
-# [FIX #17] Jawna definicja przelicznika kratka → metr.
 # CAŁA kinematyka (V_MAX, ACCELERATION, dist_cost, braking_dist) zakłada tę równość.
 # Zmiana CELL_SIZE_M wymaga przeliczenia WSZYSTKICH parametrów fizycznych.
 CELL_SIZE_M: float = 1.0             # 1 kratka = 1 metr
@@ -26,7 +25,6 @@ BUILDING_SAFE_MARGIN: float = 4.0
 GRADIENT_RANGE: int   = 15           # Zasięg gradientu [kratki]
 GRADIENT_DECAY: float = 6.0          # Stała zaniku eksponencjalnego (exp(-d / DECAY))
 
-# [FIX #6] Jawne progi kolizji i ryzyka:
 #   grid == 1.0                          → budynek (fizyczna przeszkoda)
 #   COLLISION_GRID_THRESHOLD ≤ grid < 1  → strefa kolizji (jak budynek w is_collision)
 #   0.0 < grid < COLLISION_GRID_THRESHOLD → strefa ryzyka (przelotowa, kosztowna)
@@ -78,17 +76,17 @@ TURN_PENALTY: float = 20.0
 # Mnożnik > 1.0 → Weighted A* (ε = multiplier − 1.0).
 # Gwarancja: koszt rozwiązania ≤ (1+ε) × optimum.
 # Ustawienie 1.0 → czysta dopuszczalność (gwarancja optymalności, wolniejsze).
-HEURISTIC_MULT_ASTAR: float = 1.001  # ε = 0.001 (~0.1% ponad optimum)
-HEURISTIC_MULT_RISK:  float = 1.001  # ε = 0.001
+HEURISTIC_MULT_ASTAR: float = 1.0  # ε = 0.001 (~0.1% ponad optimum)
+HEURISTIC_MULT_RISK:  float = 1.0  # ε = 0.001
 
 # ─────────────────────────────────────────────────────────────────────────────
 # BENCHMARK (Monte Carlo)
 # ─────────────────────────────────────────────────────────────────────────────
-N_TESTS: int = 50                # Liczba prób Monte Carlo
+N_TESTS: int = 5                # Liczba prób Monte Carlo
 
 # Wagi ryzyka w sweep Pareto
-PARETO_WEIGHT_STEP: int = 5
-PARETO_WEIGHT_MAX:  int = 50
+PARETO_WEIGHT_STEP: int = 10
+PARETO_WEIGHT_MAX:  int = 30
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PLANOWANIE KINEMATYCZNE / SYMULACJA ONLINE

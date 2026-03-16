@@ -3,7 +3,6 @@ from algorithms.dijkstra import run_dijkstra
 from algorithms.a_star import run_astar
 from algorithms.a_star_risk import run_risk_astar
 from visualization.plotter import plot_simulation, plot_interactive_risk, run_online_simulation
-from algorithms.common import generate_analysis_table
 from visualization.plotter import generate_thesis_charts
 from typing import Tuple
 import random
@@ -82,7 +81,10 @@ def run_offline_mode(density: float, interactive: bool = True, density_label: st
         obstacle_density=density
     )
 
-    # [FIX #2] Wspólna kara TURN_PENALTY dla wszystkich algorytmów
+    # [OPT] 3 uruchomienia — tylko to, co potrzebne do wizualizacji
+    import time as _time
+    t0 = _time.time()
+
     path_d, stats_d = run_dijkstra(env, START_POS, GOAL_POS,
                                    risk_weight=RISK_WEIGHT, turn_penalty=TURN_PENALTY,
                                    drone_radius=COLLISION_RADIUS)
@@ -93,12 +95,8 @@ def run_offline_mode(density: float, interactive: bool = True, density_label: st
                                      risk_weight=RISK_WEIGHT, turn_penalty=TURN_PENALTY,
                                      drone_radius=COLLISION_RADIUS)
 
-    generate_thesis_charts(
-        envs=[env], start=START_POS, goal=GOAL_POS,
-        func_dijkstra=run_dijkstra, func_astar=run_astar, func_risk_astar=run_risk_astar,
-        collision_radius=COLLISION_RADIUS, density_label=density_label,
-        turn_penalty=TURN_PENALTY
-    )
+    elapsed = _time.time() - t0
+    print(f"Planowanie zakończone w {elapsed:.1f}s")
 
     if interactive:
         print("\n Wizualizacja algorytmów na mapie...")
@@ -107,6 +105,14 @@ def run_offline_mode(density: float, interactive: bool = True, density_label: st
         if path_a:
             plot_simulation(env, path_a, stats_a, "2. A* Standard (Szybki W=20)", block=False, use_smoothing=True)
         plot_interactive_risk(env, START_POS, GOAL_POS, run_risk_astar)
+
+    print("\n Generowanie wykresów do pracy...")
+    generate_thesis_charts(
+        envs=[env], start=START_POS, goal=GOAL_POS,
+        func_dijkstra=run_dijkstra, func_astar=run_astar, func_risk_astar=run_risk_astar,
+        collision_radius=COLLISION_RADIUS, density_label=density_label,
+        turn_penalty=TURN_PENALTY
+    )
 
 
 def run_batch_benchmark() -> None:
@@ -144,14 +150,12 @@ def run_batch_benchmark() -> None:
                 obstacle_density=den
             )
 
-            _, sd = run_dijkstra(env, START_POS, GOAL_POS,
-                                 risk_weight=0.0, turn_penalty=0.0, drone_radius=COLLISION_RADIUS)
+            # [OPT] Walidacja jednym algorytmem — przy W=0, turn_penalty=0
+            # wszystkie 3 mają identyczny graf → wystarczy A* (najszybszy).
             _, sa = run_astar(env, START_POS, GOAL_POS,
                               risk_weight=0.0, turn_penalty=0.0, drone_radius=COLLISION_RADIUS)
-            _, sr = run_risk_astar(env, START_POS, GOAL_POS,
-                                   risk_weight=0.0, turn_penalty=0.0, drone_radius=COLLISION_RADIUS)
 
-            if sd['found'] and sa['found'] and sr['found']:
+            if sa['found']:
                 envs.append(env)
                 valid_maps_count += 1
                 print(f"  [+] Mapa {valid_maps_count}/{N_TESTS} (po {attempts} próbach)")
