@@ -526,7 +526,8 @@ def run_online_simulation(
             return
 
         processing_delay = 0.8
-        acceleration = ACCELERATION
+        onclick_mass = mass_slider.val
+        acceleration = MAX_THRUST_NET_N / onclick_mass
 
         v_detect = float(global_speeds[collision_idx])
         print(f"\n-> WYKRYTO ZAGROŻENIE! Prędkość: {v_detect:.1f} m/s")

@@ -356,7 +356,7 @@ def base_search(
         if current.x == goal_x and current.y == goal_y:
             execution_time = time.time() - t0
             path, length, total_risk, turns = reconstruct_path(current, grid_map)
-            flight_time = calculate_kinematic_flight_time(path)
+            flight_time = calculate_kinematic_flight_time(path, mass=drone_mass)
 
             decomposed = decompose_path_costs(path, grid_map, risk_weight, turn_penalty)
 
