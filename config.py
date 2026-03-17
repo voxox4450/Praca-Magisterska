@@ -80,15 +80,6 @@ HEURISTIC_MULT_ASTAR: float = 1.0  # ε = 0.001 (~0.1% ponad optimum)
 HEURISTIC_MULT_RISK:  float = 1.0  # ε = 0.001
 
 # ─────────────────────────────────────────────────────────────────────────────
-# BENCHMARK (Monte Carlo)
-# ─────────────────────────────────────────────────────────────────────────────
-N_TESTS: int = 5                # Liczba prób Monte Carlo
-
-# Wagi ryzyka w sweep Pareto
-PARETO_WEIGHT_STEP: int = 10
-PARETO_WEIGHT_MAX:  int = 30
-
-# ─────────────────────────────────────────────────────────────────────────────
 # PLANOWANIE KINEMATYCZNE / SYMULACJA ONLINE
 # ─────────────────────────────────────────────────────────────────────────────
 # [FIX #24] Zasięg sensora — importowany z config wszędzie (nie hardcoded)

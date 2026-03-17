@@ -151,47 +151,6 @@ def compute_safe_turn_speed(angle: float) -> float:
     return max(MIN_TURN_SPEED, min(v, V_MAX_MS))
 
 
-def generate_analysis_table(
-        env: GridMap,
-        start_pos: Tuple[int, int],
-        target_pos: Tuple[int, int],
-        search_func: Callable,
-        base_len: float,
-        base_risk: float,
-        collision_radius: float,
-        table_title: str = "ANALIZA",
-        turn_penalty: float = TURN_PENALTY
-) -> None:
-    from config import PARETO_WEIGHT_MAX, PARETO_WEIGHT_STEP, RISK_WEIGHT
-    risk_weights = sorted(set(
-        [float(x) for x in range(0, PARETO_WEIGHT_MAX + 1, PARETO_WEIGHT_STEP)] + [RISK_WEIGHT]
-    ))
-
-    print("-" * 90)
-    print(f"{table_title}")
-    print("-" * 90)
-    print(f"Baza: Dystans: {base_len:.2f} | Ryzyko: {base_risk:.2f}")
-    print("-" * 90)
-    print(f"{'Waga (W)':<10} | {'Dystans':<10} | {'Koszt [%]':<10} | {'Ryzyko':<10} | {'Zmiana Ryzyka [%]':<20}")
-    print("-" * 90)
-
-    for w in risk_weights:
-        _, stats = search_func(env, start_pos, target_pos, risk_weight=w, turn_penalty=turn_penalty,
-                               drone_radius=collision_radius)
-
-        if stats['found'] and base_len > 0:
-            len_inc = ((stats['length'] - base_len) / base_len) * 100
-            risk_change = 0.0
-            if base_risk > 0:
-                risk_change = ((stats['risk'] - base_risk) / base_risk) * 100
-            print(
-                f"{w:<10.1f} | {stats['length']:<10.2f} | +{len_inc:<9.2f} | {stats['risk']:<10.2f} | {risk_change:<+19.2f}")
-        else:
-            print(f"{w:<10.1f} | BRAK TRASY")
-
-    print("-" * 90)
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # [FIX #9, #19] Czas lotu z forward-backward pass na prędkościach węzłów.
 # Eliminuje magiczną karę +2.0s i gwarantuje fizyczną spójność.
