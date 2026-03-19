@@ -91,10 +91,10 @@ def reconstruct_path(node: Node, grid_map: GridMap) -> Tuple[List[Tuple[int, int
 # Używana spójnie przez offline i online.
 # ─────────────────────────────────────────────────────────────────────────────
 def calculate_segment_risk(path: List[Tuple[int, int]], env: GridMap) -> float:
-    """Oblicza całkowite ryzyko na ścieżce (suma wartości grid dla każdej komórki)."""
+    """Oblicza całkowite ryzyko na ścieżce (uwzględniając powierzchnię drona)."""
     total_risk = 0.0
     for p in path:
-        val = env.grid[int(p[0]), int(p[1])]
+        val = env.risk_grid[int(p[0]), int(p[1])] # ZMIANA na risk_grid
         if val < 1.0:
             total_risk += val
     return total_risk
@@ -346,7 +346,7 @@ def base_search(
 
     # [OPT] Lokalne referencje — unika wielokrotnego rozwiązywania atrybutów
     collision_mask = grid_map.collision_mask
-    grid = grid_map.grid
+    risk_grid = grid_map.risk_grid
     goal_x, goal_y = goal
 
     while open_list:
@@ -399,7 +399,7 @@ def base_search(
                 continue
 
             # [OPT] Bezpośredni dostęp do tablicy zamiast get_cost()
-            cell_risk = grid[nx, ny]
+            cell_risk = risk_grid[nx, ny]
             static_risk_cost = cell_risk * risk_weight
 
             turn_cost = 0.0
@@ -472,3 +472,24 @@ def base_search(
         "turns": 0, "nodes": nodes_expanded, "flight_time": 0,
         "g_cost": 0, "cost_dist": 0, "cost_risk": 0, "cost_turn": 0
     }
+def sensor_range_for_mass(mass: float) -> float:
+    """
+    Zasięg sensora [m] rośnie liniowo wraz z udźwigiem (lepszy sprzęt),
+    ale jest nasycany na wartości 60.0 m ze względu na typowe ograniczenia
+    widoczności w terenie zurbanizowanym (tzw. miejskie kaniony).
+    - 1 kg  -> 16.5 m
+    - 15 kg -> 37.5 m
+    - >= 30 kg -> 60.0 m
+    """
+    return min(60.0, 15.0 + 1.5 * mass)
+
+def processing_delay_for_mass(mass: float) -> float:
+    """
+    Czas reakcji [s] uwzględniający czas obliczeń replanowania trasy
+    oraz bezwładność rotacyjną drona (czas potrzebny na zmianę wektora ciągu).
+    Rośnie z masą, ale nie przekracza 0.8 s dla maszyn o masie 30 kg i większej.
+    - 1 kg  -> 0.22 s
+    - 15 kg -> 0.50 s
+    - >= 30 kg -> 0.80 s
+    """
+    return 0.80

@@ -1,7 +1,7 @@
 import numpy as np
 import random
 from typing import List, Tuple
-from scipy.ndimage import distance_transform_edt
+from scipy.ndimage import distance_transform_edt, maximum_filter
 from config import (
     BUILDING_SAFE_MARGIN, GRADIENT_RANGE, GRADIENT_DECAY,
     COLLISION_RADIUS, COLLISION_GRID_THRESHOLD, SOFT_RISK_CAP
@@ -23,15 +23,18 @@ class GridMap:
         self.dist_matrix = np.zeros((width, height), dtype=np.float64)
         self.dynamic_obstacles: List[Tuple[int, int, int]] = []
 
-        # [OPT] Prekomputowana maska kolizji — bool numpy array.
+        self.current_phys_r = 1.0
+        self.current_col_r = 3.0
+
         # Eliminuje wywołanie is_collision() (Python function call) per sąsiad.
         self.collision_mask = np.ones((width, height), dtype=bool)
+        self.risk_grid = np.zeros((width, height), dtype=np.float64)  # DODANE C-Space ryzyka
 
         self._generate_urban_layout(obstacle_density, start_pos, goal_pos)
         self._generate_soft_risk_zones(risk_zones_count, start_pos, goal_pos)
 
         # [OPT] Maska budowana RAZ po pełnej konstrukcji mapy
-        self._recompute_collision_mask(COLLISION_RADIUS)
+        self.update_drone_footprint(self.current_phys_r, self.current_col_r)
 
     def _recompute_dist_matrix(self) -> None:
         """Przelicza macierz euklidesowych odległości od najbliższego budynku (grid==1.0)."""
@@ -41,36 +44,48 @@ class GridMap:
 
     # [OPT] Wektorowa maska kolizji — zastępuje is_collision() w pętli przeszukiwania.
     # Obliczana raz O(W×H), zamiast per-sąsiad O(nodes×8).
-    def _recompute_collision_mask(self, drone_radius: float = COLLISION_RADIUS) -> None:
-        """Przelicza boolowską maskę kolizji na podstawie dist_matrix i grid."""
+    def update_drone_footprint(self, physical_radius: float, collision_radius: float) -> None:
+        """Przelicza maskę kolizji oraz siatkę ryzyka (C-Space ryzyka) dla drona."""
+        self.current_phys_r = physical_radius
+        self.current_col_r = collision_radius
+
         w, h = self.width, self.height
-        physical_margin = 1
+        physical_margin = max(1, int(np.ceil(physical_radius)))
 
-        mask = np.ones((w, h), dtype=bool)  # True = kolizja
-
+        # 1. MASKA KOLIZJI (jak dotychczas)
+        mask = np.ones((w, h), dtype=bool)
         interior = np.zeros((w, h), dtype=bool)
         interior[physical_margin:w - physical_margin, physical_margin:h - physical_margin] = True
 
         safe = (
-            interior
-            & (self.dist_matrix > drone_radius)
-            & (self.grid < COLLISION_GRID_THRESHOLD)
+                interior
+                & (self.dist_matrix > collision_radius)
+                & (self.grid < COLLISION_GRID_THRESHOLD)
         )
         mask[safe] = False
 
         for (ox, oy, r) in self.dynamic_obstacles:
-            x_min = max(0, ox - int(r + drone_radius) - 1)
-            x_max = min(w, ox + int(r + drone_radius) + 2)
-            y_min = max(0, oy - int(r + drone_radius) - 1)
-            y_max = min(h, oy + int(r + drone_radius) + 2)
+            x_min = max(0, ox - int(r + collision_radius) - 1)
+            x_max = min(w, ox + int(r + collision_radius) + 2)
+            y_min = max(0, oy - int(r + collision_radius) - 1)
+            y_max = min(h, oy + int(r + collision_radius) + 2)
 
             xs = np.arange(x_min, x_max)
             ys = np.arange(y_min, y_max)
             xx, yy = np.meshgrid(xs, ys, indexing='ij')
             dist_sq = (xx - ox) ** 2 + (yy - oy) ** 2
-            mask[x_min:x_max, y_min:y_max] |= (dist_sq <= (r + drone_radius) ** 2)
+            mask[x_min:x_max, y_min:y_max] |= (dist_sq <= (r + collision_radius) ** 2)
 
         self.collision_mask = mask
+
+        # 2. SIATKA RYZYKA Z UWZGLĘDNIENIEM WYMIARÓW DRONA (Dylatacja)
+        r_int = int(np.ceil(physical_radius))
+        if r_int > 0:
+            y_idx, x_idx = np.ogrid[-r_int:r_int + 1, -r_int:r_int + 1]
+            footprint = x_idx ** 2 + y_idx ** 2 <= physical_radius ** 2
+            self.risk_grid = maximum_filter(self.grid, footprint=footprint)
+        else:
+            self.risk_grid = np.copy(self.grid)
 
     def _generate_urban_layout(self, density: float, start_pos, goal_pos) -> None:
         total_pixels = self.width * self.height
@@ -117,12 +132,12 @@ class GridMap:
 
     def get_cost(self, x: int, y: int) -> float:
         if 0 <= x < self.width and 0 <= y < self.height:
-            return float(self.grid[x, y])
+            return float(self.risk_grid[x, y])
         return 1.0
 
     def is_collision(self, x, y, drone_radius: float = COLLISION_RADIUS) -> bool:
         """Fallback dla trybu online i kompatybilności wstecznej."""
-        physical_margin = 1
+        physical_margin = max(1, int(np.ceil(self.current_phys_r)))
         if not (physical_margin <= x < self.width - physical_margin
                 and physical_margin <= y < self.height - physical_margin):
             return True
@@ -171,7 +186,7 @@ class GridMap:
         self.grid[x_min:x_max, y_min:y_max] = region
 
         self._recompute_dist_matrix()
-        self._recompute_collision_mask(COLLISION_RADIUS)
+        self.update_drone_footprint(self.current_phys_r, self.current_col_r)
 
     # [OPT] Wektoryzacja stref ryzyka — meshgrid zamiast pętli Python
     def _generate_soft_risk_zones(self, num_zones: int, start_pos: Tuple[int, int],
