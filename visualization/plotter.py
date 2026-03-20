@@ -20,6 +20,27 @@ from config import (
     COLLISION_RADIUS, OBSTACLE_RADIUS,
     DRONE_MASS_KG, MAX_THRUST_NET_N
 )
+from scipy.ndimage import convolve as _ndimage_convolve
+
+
+def _compute_baseline_risk(path, grid_no_obstacle, physical_radius):
+    """Oblicza ryzyko na ścieżce używając oryginalnej siatki (bez przeszkody dynamicznej)
+    z uwzględnieniem aktualnego promienia drona (konwolucja kołowa)."""
+    r_int = int(np.ceil(physical_radius))
+    if r_int > 0:
+        y_idx, x_idx = np.ogrid[-r_int:r_int + 1, -r_int:r_int + 1]
+        kernel = (x_idx ** 2 + y_idx ** 2 <= physical_radius ** 2).astype(float)
+        kernel /= kernel.sum()
+        risk_grid = _ndimage_convolve(grid_no_obstacle, kernel, mode='constant', cval=0.0)
+    else:
+        risk_grid = grid_no_obstacle
+
+    total_risk = 0.0
+    for p in path:
+        val = risk_grid[int(p[0]), int(p[1])]
+        if val < 1.0:
+            total_risk += val
+    return total_risk
 
 
 def _setup_ui_colorbars(fig, ax, img, speed_axes_rect: list,
@@ -216,7 +237,9 @@ def run_online_simulation(
                         risk_fraction=0.048, risk_pad=0.045, risk_shrink=0.72)
 
     turns = stats_global.get('turns', 0)
-    initial_title = (f"Optymalizacja tras BSP (Risk-Aware A*, W={RISK_WEIGHT:.0f})\n"
+    dr_init = drone_radius_for_mass(DRONE_MASS_KG)
+    a_init = MAX_THRUST_NET_N / DRONE_MASS_KG
+    initial_title = (f"Optymalizacja tras BSP (Risk-Aware A*, W={RISK_WEIGHT:.0f}, m={DRONE_MASS_KG:.0f} kg, r={dr_init:.2f} m, a={a_init:.1f} m/s²)\n"
                      f"Droga: {stats_global['length']:.1f} m | "
                      f"Czas: {stats_global.get('flight_time', 0):.1f} s | "
                      f"Ryzyko: {stats_global['risk']:.1f} | Zakręty: {turns}")
@@ -554,11 +577,13 @@ def run_online_simulation(
             t_risk = sim_state["flown_risk"] + calculate_segment_risk(full_new_path, env)
             t_turns = sim_state["flown_turns"] + f_turns
 
-            # Przelicz baseline z aktualną masą (oryginalna trasa bez przeszkody)
+            # Przelicz baseline z aktualną masą (oryginalna trasa BEZ przeszkody dynamicznej)
             orig_path = sim_state["path_global_original"]
             base_dist = calculate_path_length(orig_path)
             base_time = calculate_kinematic_flight_time(orig_path, mass=m)
-            base_risk = calculate_segment_risk(orig_path, env)
+            grid_orig = sim_state.get("grid_before_obstacle", env.grid)
+            phys_r = drone_radius_for_mass(m)
+            base_risk = _compute_baseline_risk(orig_path, grid_orig, phys_r)
             base_turns_count = 0
             if len(orig_path) > 2:
                 _ld = (orig_path[1][0] - orig_path[0][0], orig_path[1][1] - orig_path[0][1])
@@ -612,6 +637,7 @@ def run_online_simulation(
 
         click_x, click_y = int(event.xdata), int(event.ydata)
         sim_state["obstacle_pos"] = (click_x, click_y)
+        sim_state["grid_before_obstacle"] = env.grid.copy()
         env.add_dynamic_risk_zone(click_x, click_y, radius=OBSTACLE_RADIUS)
         img.set_data(env.grid.T)
 
@@ -1076,11 +1102,13 @@ def _open_comparison_windows(
                     t_risk = flown_risk_cmp + calculate_segment_risk(path_replan, env)
                     t_turns = flown_turns_cmp + stats_replan.get('turns', 0)
 
-                    # Przelicz baseline z aktualną masą
+                    # Przelicz baseline z aktualną masą (BEZ przeszkody dynamicznej)
                     orig_path = sim_st.get("path_global_original", path_global_ref)
                     b_dist = calculate_path_length(orig_path)
                     b_time = calculate_kinematic_flight_time(orig_path, mass=m)
-                    b_risk = calculate_segment_risk(orig_path, env)
+                    grid_orig = sim_st.get("grid_before_obstacle", env.grid)
+                    phys_r = drone_radius_for_mass(m)
+                    b_risk = _compute_baseline_risk(orig_path, grid_orig, phys_r)
                     b_turns = 0
                     if len(orig_path) > 2:
                         _ld2 = (orig_path[1][0] - orig_path[0][0], orig_path[1][1] - orig_path[0][1])
@@ -1180,7 +1208,9 @@ def _open_comparison_windows(
                         orig_path = sim_st.get("path_global_original", path_global_ref)
                         b_dist = calculate_path_length(orig_path)
                         b_time = calculate_kinematic_flight_time(orig_path, mass=m)
-                        b_risk = calculate_segment_risk(orig_path, env)
+                        grid_orig = sim_st.get("grid_before_obstacle", env.grid)
+                        phys_r = drone_radius_for_mass(m)
+                        b_risk = _compute_baseline_risk(orig_path, grid_orig, phys_r)
                         b_turns = 0
                         if len(orig_path) > 2:
                             _ld2 = (orig_path[1][0] - orig_path[0][0], orig_path[1][1] - orig_path[0][1])
