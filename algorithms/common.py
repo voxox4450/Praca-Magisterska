@@ -1,4 +1,4 @@
-from typing import Tuple, List, Optional, Callable, Dict, Any
+from typing import Tuple, List, Optional, Dict, Any
 import math
 import heapq
 import time
@@ -12,12 +12,21 @@ from config import (
 )
 
 
-BRAKING_BUCKET_SIZE: float = 5.0   # [kratki] – dokładność dyskretyzacji drogi hamowania
+BRAKING_BUCKET_SIZE: float = 3.0   # [kratki] – dokładność dyskretyzacji drogi hamowania (mniejsza = więcej stanów, dokładniej)
 _RAD_170: float = math.radians(170)  # [OPT] Prekomputowany próg zawracania
 
 
 def drone_radius_for_mass(mass: float) -> float:
-    """Promień fizyczny drona: r = 1.0 * sqrt(m / 30)."""
+    """
+    Promień fizyczny drona: r = r_ref × √(m / m_ref).
+    Skalowanie izometryczne — zakłada że większy dron (większa masa)
+    wymaga proporcjonalnie większej konstrukcji (ramion, śmigieł),
+    przy zachowaniu podobieństwa geometrycznego. Promień rośnie jak
+    pierwiastek masy, bo masa ∝ objętość ∝ r³, ale w praktyce drony
+    wielowirnikowe skalują się bliżej r² (płaska konstrukcja).
+    Przyjęto √ jako kompromis między skalowaniem 2D i 3D.
+    Referencja: m_ref=30 kg → r_ref=1.0 m (typowy dron dostawczy).
+    """
     return 1.0 * math.sqrt(mass / 30.0)
 
 
@@ -28,7 +37,7 @@ def collision_radius_for_mass(mass: float) -> float:
 
 def _braking_bucket(straight_dist: float) -> int:
     """Konwertuje ciągły straight_dist na dyskretny kubełek dla klucza stanu."""
-    return min(int(straight_dist / BRAKING_BUCKET_SIZE), 20)
+    return min(int(straight_dist / BRAKING_BUCKET_SIZE), 30)
 
 
 class Node:
@@ -485,11 +494,12 @@ def sensor_range_for_mass(mass: float) -> float:
 
 def processing_delay_for_mass(mass: float) -> float:
     """
-    Czas reakcji [s] uwzględniający czas obliczeń replanowania trasy
-    oraz bezwładność rotacyjną drona (czas potrzebny na zmianę wektora ciągu).
-    Rośnie z masą, ale nie przekracza 0.8 s dla maszyn o masie 30 kg i większej.
-    - 1 kg  -> 0.22 s
-    - 15 kg -> 0.50 s
-    - >= 30 kg -> 0.80 s
+    Stały czas reakcji [s] = 0.80 s.
+    Obejmuje czas przetwarzania sensorycznego, replanowania trasy
+    oraz inicjacji manewru unikowego. Przyjęto wartość stałą niezależną
+    od masy — uzasadnienie: czas obliczeń zależy od procesora pokładowego
+    (identyczny dla wszystkich wariantów drona w badaniu), a bezwładność
+    rotacyjna jest kompensowana przez proporcjonalnie większy moment obrotowy
+    silników w cięższych maszynach.
     """
     return 0.80

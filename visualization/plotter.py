@@ -17,7 +17,7 @@ from algorithms.common import (
 from config import (
     V_MAX_MS, ACCELERATION, MAX_LATERAL_ACCEL, MIN_TURN_SPEED,
     RISK_WEIGHT, TURN_PENALTY,
-    COLLISION_RADIUS,
+    COLLISION_RADIUS, OBSTACLE_RADIUS,
     DRONE_MASS_KG, MAX_THRUST_NET_N
 )
 
@@ -223,7 +223,8 @@ def run_online_simulation(
     ax.set_title(initial_title, fontsize=14, color='white', pad=25)
 
     gx_smooth, gy_smooth = smooth_path_bspline(path_global)
-    global_speeds = compute_path_speeds(path_global)
+    initial_accel = MAX_THRUST_NET_N / DRONE_MASS_KG
+    global_speeds = compute_path_speeds(path_global, accel=initial_accel)
 
     line_global, = ax.plot(gx_smooth, gy_smooth, color='gray', linestyle='--', linewidth=2.5, alpha=0.8,
                            label='Pierwotny Plan')
@@ -323,7 +324,6 @@ def run_online_simulation(
             return
 
         click_x, click_y = sim_state["obstacle_pos"]
-        OBSTACLE_RADIUS = 8
 
         w = risk_slider.val
         m = mass_slider.val
@@ -611,7 +611,6 @@ def run_online_simulation(
         global_speeds = sim_state["global_speeds"]
 
         click_x, click_y = int(event.xdata), int(event.ydata)
-        OBSTACLE_RADIUS = 8
         sim_state["obstacle_pos"] = (click_x, click_y)
         env.add_dynamic_risk_zone(click_x, click_y, radius=OBSTACLE_RADIUS)
         img.set_data(env.grid.T)
@@ -930,7 +929,6 @@ def _open_comparison_windows(
 
                 if sim_st.get("obstacle_pos") is None: return
                 cx, cy = sim_st["obstacle_pos"]
-                OBSTACLE_RADIUS = 8
 
                 # Dynamiczna detekcja w oknach pobocznych!
                 current_sensor_range = sensor_range_for_mass(m)

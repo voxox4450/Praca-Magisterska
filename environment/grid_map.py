@@ -1,7 +1,7 @@
 import numpy as np
 import random
 from typing import List, Tuple
-from scipy.ndimage import distance_transform_edt, maximum_filter
+from scipy.ndimage import distance_transform_edt, convolve
 from config import (
     BUILDING_SAFE_MARGIN, GRADIENT_RANGE, GRADIENT_DECAY,
     COLLISION_RADIUS, COLLISION_GRID_THRESHOLD, SOFT_RISK_CAP
@@ -78,12 +78,18 @@ class GridMap:
 
         self.collision_mask = mask
 
-        # 2. SIATKA RYZYKA Z UWZGLĘDNIENIEM WYMIARÓW DRONA (Dylatacja)
+        # 2. SIATKA RYZYKA — PROPORCJONALNA DO POKRYCIA DRONA
+        # Średnia ważona ryzyka pod footprintem drona (koło o promieniu fizycznym).
+        # Jeśli tylko krawędź drona wchodzi w strefę ryzyka → niskie ryzyko.
+        # Jeśli cały dron jest w strefie → pełne ryzyko.
+        # Fizycznie: ryzyko kolizji rośnie proporcjonalnie do pola przekroju
+        # drona eksponowanego na przeszkodę.
         r_int = int(np.ceil(physical_radius))
         if r_int > 0:
             y_idx, x_idx = np.ogrid[-r_int:r_int + 1, -r_int:r_int + 1]
-            footprint = x_idx ** 2 + y_idx ** 2 <= physical_radius ** 2
-            self.risk_grid = maximum_filter(self.grid, footprint=footprint)
+            kernel = (x_idx ** 2 + y_idx ** 2 <= physical_radius ** 2).astype(float)
+            kernel /= kernel.sum()  # normalizacja → średnia ważona
+            self.risk_grid = convolve(self.grid, kernel, mode='constant', cval=0.0)
         else:
             self.risk_grid = np.copy(self.grid)
 

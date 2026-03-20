@@ -78,3 +78,8 @@ TURN_PENALTY: float = 20.0
 # Ustawienie 1.0 → czysta dopuszczalność (gwarancja optymalności, wolniejsze).
 HEURISTIC_MULT_ASTAR: float = 1.0  # ε = 0.001 (~0.1% ponad optimum)
 HEURISTIC_MULT_RISK:  float = 1.0  # ε = 0.001
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SYMULACJA ONLINE
+# ─────────────────────────────────────────────────────────────────────────────
+OBSTACLE_RADIUS: int = 8             # Promień dynamicznej przeszkody [kratki]
