@@ -20,34 +20,14 @@ from config import (
     COLLISION_RADIUS, OBSTACLE_RADIUS,
     DRONE_MASS_KG, MAX_THRUST_NET_N
 )
-from scipy.ndimage import convolve as _ndimage_convolve
-
-
-def _compute_baseline_risk(path, grid_no_obstacle, physical_radius):
-    """Oblicza ryzyko na ścieżce używając oryginalnej siatki (bez przeszkody dynamicznej)
-    z uwzględnieniem aktualnego promienia drona (konwolucja kołowa)."""
-    r_int = int(np.ceil(physical_radius))
-    if r_int > 0:
-        y_idx, x_idx = np.ogrid[-r_int:r_int + 1, -r_int:r_int + 1]
-        kernel = (x_idx ** 2 + y_idx ** 2 <= physical_radius ** 2).astype(float)
-        kernel /= kernel.sum()
-        risk_grid = _ndimage_convolve(grid_no_obstacle, kernel, mode='constant', cval=0.0)
-    else:
-        risk_grid = grid_no_obstacle
-
-    total_risk = 0.0
-    for p in path:
-        val = risk_grid[int(p[0]), int(p[1])]
-        if val < 1.0:
-            total_risk += val
-    return total_risk
 
 
 def _setup_ui_colorbars(fig, ax, img, speed_axes_rect: list,
                         risk_fraction: float = 0.046,
                         risk_pad: float = 0.05,
                         risk_shrink: float = 0.80) -> None:
-    cbar = fig.colorbar(img, ax=ax, location='right', fraction=risk_fraction, pad=risk_pad, shrink=risk_shrink, anchor=(0.0, 1.0))
+    cbar = fig.colorbar(img, ax=ax, location='right', fraction=risk_fraction, pad=risk_pad, shrink=risk_shrink,
+                        anchor=(0.0, 1.0))
     cbar.set_ticks([0, 0.5, 1])
     cbar.set_ticklabels(['Bezpiecznie', 'Ryzyko', 'BUDYNEK'])
     cbar.ax.yaxis.set_tick_params(color='white', labelcolor='white')
@@ -183,24 +163,401 @@ def smooth_path_with_speeds(path: List[Tuple[int, int]], speeds: np.ndarray,
 
         a = accel
         for i in range(1, len(speeds_smooth)):
-            dist = math.hypot(x_smooth[i] - x_smooth[i-1], y_smooth[i] - y_smooth[i-1])
+            dist = math.hypot(x_smooth[i] - x_smooth[i - 1], y_smooth[i] - y_smooth[i - 1])
             speeds_smooth[i] = min(speeds_smooth[i],
-                                   math.sqrt(max(0.0, speeds_smooth[i-1]**2 + 2*a*dist)))
-        for i in range(len(speeds_smooth)-2, -1, -1):
-            dist = math.hypot(x_smooth[i+1] - x_smooth[i], y_smooth[i+1] - y_smooth[i])
+                                   math.sqrt(max(0.0, speeds_smooth[i - 1] ** 2 + 2 * a * dist)))
+        for i in range(len(speeds_smooth) - 2, -1, -1):
+            dist = math.hypot(x_smooth[i + 1] - x_smooth[i], y_smooth[i + 1] - y_smooth[i])
             speeds_smooth[i] = min(speeds_smooth[i],
-                                   math.sqrt(max(0.0, speeds_smooth[i+1]**2 + 2*a*dist)))
+                                   math.sqrt(max(0.0, speeds_smooth[i + 1] ** 2 + 2 * a * dist)))
 
         initial_v = speeds[0]
         speeds_smooth[0] = initial_v
         for i in range(1, len(speeds_smooth)):
-            dist = math.hypot(x_smooth[i] - x_smooth[i-1], y_smooth[i] - y_smooth[i-1])
-            min_phys = math.sqrt(max(0.0, speeds_smooth[i-1]**2 - 2*a*dist))
+            dist = math.hypot(x_smooth[i] - x_smooth[i - 1], y_smooth[i] - y_smooth[i - 1])
+            min_phys = math.sqrt(max(0.0, speeds_smooth[i - 1] ** 2 - 2 * a * dist))
             speeds_smooth[i] = max(speeds_smooth[i], min_phys)
 
         return x_smooth, y_smooth, speeds_smooth
     except Exception:
         return np.array(x), np.array(y), speeds
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WSPÓLNA FUNKCJA OBLICZENIOWA
+# Oblicza pełny scenariusz dla dowolnego algorytmu: trasa czysta → detekcja →
+# reakcja → replan. Zwraca dict z danymi do wizualizacji i statystykami.
+# Używana przez update_route (Risk-Aware) i update_cmp (Dijkstra/A*).
+# ─────────────────────────────────────────────────────────────────────────────
+def _compute_full_scenario(env, start, goal, algo_func, w, m, click_pos, grid_before, use_buffer=True):
+    """
+    Oblicza pełny scenariusz omijania przeszkody.
+
+    Returns dict z kluczami:
+        'clean_path', 'clean_stats' — trasa na czystej mapie
+        'blocked' — bool, czy przeszkoda blokuje trasę
+        'detect_idx', 'react_idx', 'v_detect', 'v_react_end' — reakcja
+        'reaction_path', 'drone_pos', 'heading'
+        'replan_path', 'replan_stats' — trasa omijania
+        'buffer_points', 'buffer_dist', 'v_buffer_end'
+        'full_new_path' — bufor + replan (do rysowania)
+        'baseline' — (dist, time, risk, turns) trasy czystej
+        'total' — (dist, time, risk, turns) trasy z omijaniem
+        'crash' — bool
+        'mode' — 'CLEAR' / 'NORMAL' / 'RTH' / 'CRASH' / 'NO_SENSOR'
+    """
+    a = MAX_THRUST_NET_N / m
+    col_r = collision_radius_for_mass(m)
+    phys_r = drone_radius_for_mass(m)
+    cx, cy = click_pos
+
+    result = {}
+
+    # ── KROK 1: Planuj na czystej mapie ──────────────────────────────────
+    grid_dirty = env.grid.copy()
+    risk_dirty = env.risk_grid.copy()
+    dist_dirty = env.dist_matrix.copy()
+    mask_dirty = env.collision_mask.copy()
+    dyn_backup = list(env.dynamic_obstacles)
+
+    env.grid = grid_before.copy()
+    env.dynamic_obstacles = []
+    env._recompute_dist_matrix()
+    env.update_drone_footprint(phys_r, col_r)
+
+    clean_path, clean_stats = algo_func(env, start, goal, risk_weight=w,
+                                        turn_penalty=TURN_PENALTY,
+                                        drone_radius=col_r, drone_mass=m)
+
+    # Przywróć brudną mapę
+    env.grid = grid_dirty
+    env.risk_grid = risk_dirty
+    env.dist_matrix = dist_dirty
+    env.collision_mask = mask_dirty
+    env.dynamic_obstacles = dyn_backup
+
+    if not clean_path or not clean_stats.get('found'):
+        result['mode'] = 'NO_PATH'
+        return result
+
+    clean_speeds = compute_path_speeds(clean_path, accel=a)
+    result['clean_path'] = clean_path
+    result['clean_speeds'] = clean_speeds
+    result['clean_stats'] = clean_stats
+    result['baseline'] = (clean_stats['length'],
+                          clean_stats.get('flight_time', 0),
+                          clean_stats['risk'],
+                          clean_stats.get('turns', 0))
+
+    # ── KROK 2: Sprawdź czy przeszkoda blokuje trasę ─────────────────────
+    CRASH_DIST = OBSTACLE_RADIUS + col_r
+    is_blocked = any(
+        math.sqrt((px - cx) ** 2 + (py - cy) ** 2) <= CRASH_DIST
+        for px, py in clean_path
+    )
+
+    if not is_blocked:
+        result['mode'] = 'CLEAR'
+        result['blocked'] = False
+        return result
+
+    result['blocked'] = True
+
+    # ── KROK 3: Detekcja i reakcja ───────────────────────────────────────
+    sensor_range = sensor_range_for_mass(m)
+    proc_delay = processing_delay_for_mass(m)
+
+    detect_idx = -1
+    for i, (px, py) in enumerate(clean_path):
+        if math.sqrt((px - cx) ** 2 + (py - cy) ** 2) <= sensor_range:
+            detect_idx = i
+            break
+
+    if detect_idx == -1:
+        result['mode'] = 'NO_SENSOR'
+        return result
+
+    v_detect = float(clean_speeds[detect_idx])
+    t_stop = v_detect / a
+    t_react = min(proc_delay, t_stop)
+    react_dist = (v_detect * t_react) - (0.5 * a * (t_react ** 2))
+    react_indices = int(math.ceil(react_dist))
+    v_react_end = max(0.0, v_detect - a * proc_delay)
+
+    react_idx = min(detect_idx + react_indices, len(clean_path) - 1)
+    reaction_path = clean_path[detect_idx:react_idx + 1]
+    drone_pos = clean_path[react_idx]
+
+    result['detect_idx'] = detect_idx
+    result['react_idx'] = react_idx
+    result['v_detect'] = v_detect
+    result['v_react_end'] = v_react_end
+    result['reaction_path'] = reaction_path
+    result['drone_pos'] = drone_pos
+
+    # Heading z reakcji
+    if len(reaction_path) >= 2:
+        ldx = reaction_path[-1][0] - reaction_path[-2][0]
+        ldy = reaction_path[-1][1] - reaction_path[-2][1]
+        heading = (int(np.sign(ldx)), int(np.sign(ldy)))
+    else:
+        heading = (0, 0)
+    result['heading'] = heading
+
+    # Crash check
+    crash = any(
+        math.sqrt((cx - px) ** 2 + (cy - py) ** 2) <= (OBSTACLE_RADIUS + phys_r)
+        for px, py in reaction_path
+    )
+    if crash:
+        result['mode'] = 'CRASH'
+        result['crash'] = True
+        return result
+    result['crash'] = False
+
+    # ── KROK 4: Bufor hamowania (TYLKO Risk-Aware — ma wiedzę o prędkości) ──
+    env.update_drone_footprint(phys_r, col_r)
+
+    buffer_points = []
+    buffer_dist = 0.0
+    if use_buffer and heading != (0, 0) and v_react_end > 0:
+        r_45 = 1.5 / max(0.1, math.sin(math.radians(22.5)))
+        v_safe_ref = max(MIN_TURN_SPEED, math.sqrt(MAX_LATERAL_ACCEL * r_45))
+        v_safe_ref = min(v_safe_ref, V_MAX_MS)
+        braking_need = max(0.0, (v_react_end ** 2 - v_safe_ref ** 2) / (2 * a)) \
+            if v_react_end > v_safe_ref else 0.0
+        step_len = math.sqrt(heading[0] ** 2 + heading[1] ** 2)
+        buf_steps = max(1, int(math.ceil(braking_need / step_len)))
+        for d in range(1, buf_steps + 1):
+            bp = (drone_pos[0] + heading[0] * d, drone_pos[1] + heading[1] * d)
+            bx, by = int(bp[0]), int(bp[1])
+            if 0 <= bx < env.width and 0 <= by < env.height:
+                if not env.collision_mask[bx, by]:
+                    buffer_points.append(bp)
+                    buffer_dist += step_len
+                else:
+                    break
+            else:
+                break
+
+    v_buf_end = max(0.0, math.sqrt(max(0.0, v_react_end ** 2 - 2 * a * buffer_dist)))
+    search_start = buffer_points[-1] if buffer_points else drone_pos
+
+    result['buffer_points'] = buffer_points
+    result['buffer_dist'] = buffer_dist
+    result['v_buffer_end'] = v_buf_end
+
+    # ── KROK 5: Replan na brudnej mapie ──────────────────────────────────
+    replan_path, replan_stats = algo_func(env, search_start, goal, risk_weight=w,
+                                          turn_penalty=TURN_PENALTY, drone_radius=col_r,
+                                          initial_direction=heading,
+                                          current_speed=v_buf_end,
+                                          drone_mass=m)
+
+    if not replan_path or not replan_stats.get('found'):
+        # RTH: powrót do startu
+        replan_path, replan_stats = algo_func(env, search_start, start, risk_weight=40.0,
+                                              turn_penalty=TURN_PENALTY, drone_radius=col_r,
+                                              initial_direction=heading,
+                                              current_speed=v_buf_end,
+                                              drone_mass=m)
+        if replan_path and replan_stats.get('found'):
+            result['mode'] = 'RTH'
+        else:
+            result['mode'] = 'TRAPPED'
+            return result
+    else:
+        result['mode'] = 'NORMAL'
+
+    # Zbuduj pełną trasę od reakcji
+    if buffer_points:
+        full_new = [drone_pos] + buffer_points + replan_path[1:]
+    else:
+        full_new = replan_path
+
+    result['replan_path'] = replan_path
+    result['replan_stats'] = replan_stats
+    result['full_new_path'] = full_new
+
+    # ── KROK 6: Statystyki ───────────────────────────────────────────────
+    flown_path = clean_path[:react_idx + 1]
+    flown_dist = calculate_path_length(flown_path)
+    flown_time = calculate_kinematic_flight_time(flown_path, mass=m)
+    flown_risk = calculate_segment_risk(flown_path, env)
+    flown_turns = 0
+    if len(flown_path) > 2:
+        ld = (flown_path[1][0] - flown_path[0][0], flown_path[1][1] - flown_path[0][1])
+        for ii in range(2, len(flown_path)):
+            cd = (flown_path[ii][0] - flown_path[ii - 1][0], flown_path[ii][1] - flown_path[ii - 1][1])
+            if cd != ld:
+                flown_turns += 1
+                ld = cd
+
+    new_dist = calculate_path_length(full_new)
+    new_time = calculate_kinematic_flight_time(full_new, mass=m)
+    new_risk = calculate_segment_risk(full_new, env)
+    new_turns = 0
+    if len(full_new) > 2:
+        ld = (full_new[1][0] - full_new[0][0], full_new[1][1] - full_new[0][1])
+        for ii in range(2, len(full_new)):
+            cd = (full_new[ii][0] - full_new[ii - 1][0], full_new[ii][1] - full_new[ii - 1][1])
+            if cd != ld:
+                new_turns += 1
+                ld = cd
+
+    result['total'] = (flown_dist + new_dist,
+                       flown_time + new_time,
+                       flown_risk + new_risk,
+                       flown_turns + new_turns)
+
+    return result
+
+
+def _draw_scenario(result, ax, lc_flown_bg, lc_flown, line_reaction, drone_marker,
+                   lc_new_bg, lc_new, line_global, algo_name, title_color, w, m):
+    """Rysuje wynik _compute_full_scenario na osi matplotlib."""
+    a = MAX_THRUST_NET_N / m
+    dr = drone_radius_for_mass(m)
+    fmt = lambda v: f"+{v:.1f}" if v > 0 else f"{v:.1f}"
+    fmt_i = lambda v: f"+{int(v)}" if v > 0 else f"{int(v)}"
+
+    mode = result.get('mode', 'NO_PATH')
+
+    # Szara linia — trasa na czystej mapie
+    if 'clean_path' in result:
+        gx, gy = smooth_path_bspline(result['clean_path'])
+        line_global.set_data(gx, gy)
+
+    # Wyczyść wszystko
+    lc_flown_bg.set_segments([])
+    lc_flown.set_segments([])
+    line_reaction.set_data([], [])
+    drone_marker.set_data([], [])
+    lc_new_bg.set_segments([])
+    lc_new.set_segments([])
+
+    if mode == 'NO_PATH':
+        ax.set_title(f"{algo_name} — BRAK TRASY (W={w:.0f}, m={m:.0f} kg)",
+                     color='red', fontsize=14, pad=25)
+        return
+
+    if mode == 'CLEAR':
+        # Trasa nie blokowana — pokaż pełną trasę z prędkościami
+        cp = result['clean_path']
+        cs = result['clean_speeds']
+        sx, sy, ss = smooth_path_with_speeds(cp, cs, accel=a)
+        pts = np.array([sx, sy]).T.reshape(-1, 1, 2)
+        segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
+        lc_flown_bg.set_segments(segs)
+        lc_flown.set_segments(segs)
+        lc_flown.set_array((ss[:-1] + ss[1:]) / 2.0)
+
+        bd, bt, br, btr = result['baseline']
+        ax.set_title(
+            f"{algo_name} — Zagrożenie poza kursem (W={w:.0f}, m={m:.0f} kg, r={dr:.2f} m, a={a:.1f} m/s²)\n"
+            f"Droga: {bd:.1f} m | Czas: {bt:.1f}s | Ryzyko: {br:.1f} | Zakręty: {btr}",
+            fontsize=14, color='lime', pad=25)
+        return
+
+    if mode == 'NO_SENSOR':
+        ax.set_title(f"{algo_name} — KATASTROFA! Zbyt mały zasięg czujnika!",
+                     color='red', fontsize=14, pad=25)
+        return
+
+    if mode == 'CRASH':
+        ax.set_title(f"{algo_name} — KATASTROFA! Zbyt duża bezwładność drona!",
+                     color='red', fontsize=14, pad=25)
+        return
+
+    if mode == 'TRAPPED':
+        ax.set_title(f"{algo_name} — DRON UWIĘZIONY! (W={w:.0f}, m={m:.0f} kg)",
+                     color='red', fontsize=14, pad=25)
+        return
+
+    # mode == 'NORMAL' or 'RTH' — rysuj pełny scenariusz omijania
+    cp = result['clean_path']
+    cs = result['clean_speeds']
+    det_idx = result['detect_idx']
+    react_idx = result['react_idx']
+
+    # Wygładź rozszerzoną trasę (droga + reakcja + lead-out)
+    end_ext = min(react_idx + 1 + 2, len(cp))
+    ext_path = cp[:end_ext]
+    ext_speeds = cs[:end_ext]
+    sx_ext, sy_ext, ss_ext = smooth_path_with_speeds(ext_path, ext_speeds, accel=a)
+
+    # Znajdź punkt detekcji i reakcji na wygładzonej krzywej
+    det_px, det_py = cp[det_idx]
+    idx_det = int(np.argmin((sx_ext - det_px) ** 2 + (sy_ext - det_py) ** 2))
+    react_px, react_py = cp[react_idx]
+    idx_react = int(np.argmin((sx_ext - react_px) ** 2 + (sy_ext - react_py) ** 2))
+
+    # Droga przebyta (start → detekcja) z kolorami prędkości
+    if idx_det > 1:
+        sx_g, sy_g, ss_g = sx_ext[:idx_det + 1], sy_ext[:idx_det + 1], ss_ext[:idx_det + 1]
+        pts_g = np.array([sx_g, sy_g]).T.reshape(-1, 1, 2)
+        segs_g = np.concatenate([pts_g[:-1], pts_g[1:]], axis=1)
+        lc_flown_bg.set_segments(segs_g)
+        lc_flown.set_segments(segs_g)
+        lc_flown.set_array((ss_g[:-1] + ss_g[1:]) / 2.0)
+
+    # Punkt wykrycia i linia reakcji (pomarańczowa przerywana)
+    drone_marker.set_data([sx_ext[idx_det]], [sy_ext[idx_det]])
+    line_reaction.set_data(sx_ext[idx_det:idx_react + 1], sy_ext[idx_det:idx_react + 1])
+
+    # Replanowana trasa z kolorami prędkości
+    full_new = result['full_new_path']
+    v_react_end = result['v_react_end']
+    speeds_new = compute_path_speeds(full_new, initial_speed=v_react_end, accel=a)
+
+    # Lead-in dla płynnego sklejenia
+    heading = result['heading']
+    drone_pos = result['drone_pos']
+    if heading != (0, 0) and len(full_new) >= 3:
+        p1 = (drone_pos[0] - heading[0] * 2.0, drone_pos[1] - heading[1] * 2.0)
+        p2 = (drone_pos[0] - heading[0] * 1.0, drone_pos[1] - heading[1] * 1.0)
+        combined = [p1, p2] + full_new
+        lead_spd = np.full(2, v_react_end)
+        combined_spd = np.concatenate([lead_spd, speeds_new])
+        sx_n, sy_n, ss_n = smooth_path_with_speeds(combined, combined_spd, accel=a)
+        # Trim lead-in
+        search_lim = min(len(sx_n), 60)
+        dists = (sx_n[:search_lim] - react_px) ** 2 + (sy_n[:search_lim] - react_py) ** 2
+        best = int(np.argmin(dists))
+        sx_n, sy_n, ss_n = sx_n[best:], sy_n[best:], ss_n[best:]
+        if len(sx_n) > 0:
+            sx_n[0] = sx_ext[idx_react]
+            sy_n[0] = sy_ext[idx_react]
+    else:
+        sx_n, sy_n, ss_n = smooth_path_with_speeds(full_new, speeds_new, accel=a)
+        if len(sx_n) > 0:
+            sx_n[0] = sx_ext[idx_react]
+            sy_n[0] = sy_ext[idx_react]
+
+    if len(sx_n) > 1:
+        pts_n = np.array([sx_n, sy_n]).T.reshape(-1, 1, 2)
+        segs_n = np.concatenate([pts_n[:-1], pts_n[1:]], axis=1)
+        lc_new_bg.set_segments(segs_n)
+        lc_new.set_segments(segs_n)
+        lc_new.set_array((ss_n[:-1] + ss_n[1:]) / 2.0)
+
+    # Statystyki
+    td, tt, tr, ttr = result['total']
+    bd, bt, br, btr = result['baseline']
+    dd, dt, dri, dtu = td - bd, tt - bt, tr - br, ttr - btr
+
+    mode_label = "Omijanie" if mode == 'NORMAL' else "Tryb Powrotu"
+    mode_w = f"W={w:.0f}" if mode == 'NORMAL' else "W=40"
+    tc = title_color if mode == 'NORMAL' else 'orange'
+
+    ax.set_title(
+        f"{algo_name} — {mode_label} ({mode_w}, m={m:.0f} kg, r={dr:.2f} m, a={a:.1f} m/s²)\n"
+        f"Droga: {td:.1f} m ({fmt(dd)} m nadłożono)\n"
+        f"Czas: {tt:.1f}s ({fmt(dt)}) | Ryzyko: {tr:.1f} ({fmt(dri)}) | "
+        f"Zakręty: {ttr} ({fmt_i(dtu)})",
+        fontsize=14, color=tc, pad=25)
+
+
 # Po kliknięciu przeszkody otwiera 3 okna:
 #   1. Risk-Aware A* (kinematyka) — hamuje, zwalnia, omija płynnie
 #   2. Dijkstra (brak kinematyki) — skręca 90° przy pełnej prędkości → rozpad
@@ -239,10 +596,11 @@ def run_online_simulation(
     turns = stats_global.get('turns', 0)
     dr_init = drone_radius_for_mass(DRONE_MASS_KG)
     a_init = MAX_THRUST_NET_N / DRONE_MASS_KG
-    initial_title = (f"Optymalizacja tras BSP (Risk-Aware A*, W={RISK_WEIGHT:.0f}, m={DRONE_MASS_KG:.0f} kg, r={dr_init:.2f} m, a={a_init:.1f} m/s²)\n"
-                     f"Droga: {stats_global['length']:.1f} m | "
-                     f"Czas: {stats_global.get('flight_time', 0):.1f} s | "
-                     f"Ryzyko: {stats_global['risk']:.1f} | Zakręty: {turns}")
+    initial_title = (
+        f"Optymalizacja tras BSP (Risk-Aware A*, W={RISK_WEIGHT:.0f}, m={DRONE_MASS_KG:.0f} kg, r={dr_init:.2f} m, a={a_init:.1f} m/s²)\n"
+        f"Droga: {stats_global['length']:.1f} m | "
+        f"Czas: {stats_global.get('flight_time', 0):.1f} s | "
+        f"Ryzyko: {stats_global['risk']:.1f} | Zakręty: {turns}")
     ax.set_title(initial_title, fontsize=14, color='white', pad=25)
 
     gx_smooth, gy_smooth = smooth_path_bspline(path_global)
@@ -305,6 +663,7 @@ def run_online_simulation(
     }
 
     def update_route(val):
+        # ── TRYB IDLE: przed kliknięciem ──────────────────────────────────
         if sim_state["mode"] == "IDLE" and not sim_state["clicked"]:
             w = risk_slider.val
             m = mass_slider.val
@@ -315,314 +674,43 @@ def run_online_simulation(
 
             new_path, new_stats = search_func(env, start, goal, risk_weight=w,
                                               turn_penalty=TURN_PENALTY,
-                                              drone_radius=col_r,
-                                              drone_mass=m)
+                                              drone_radius=col_r, drone_mass=m)
             if new_path:
                 sim_state["path_global"] = new_path
                 sim_state["path_global_original"] = list(new_path)
                 new_speeds = compute_path_speeds(new_path, accel=a_cur)
                 sim_state["global_speeds"] = new_speeds
-                sim_state["base_dist"] = new_stats['length']
-                sim_state["base_time"] = new_stats.get('flight_time', 0)
-                sim_state["base_risk"] = new_stats['risk']
-                sim_state["base_turns"] = new_stats.get('turns', 0)
 
                 gx_s, gy_s = smooth_path_bspline(new_path)
                 line_global.set_data(gx_s, gy_s)
 
-                turns_g = new_stats.get('turns', 0)
-                flight_t = calculate_kinematic_flight_time(new_path, mass=m)
                 dr = drone_radius_for_mass(m)
+                flight_t = calculate_kinematic_flight_time(new_path, mass=m)
                 ax.set_title(
                     f"Optymalizacja tras BSP (Risk-Aware A*, W={w:.0f}, m={m:.0f} kg, r={dr:.2f} m, a={a_cur:.1f} m/s²)\n"
                     f"Droga: {new_stats['length']:.1f} m | Czas: {flight_t:.1f} s | "
-                    f"Ryzyko: {new_stats['risk']:.1f} | Zakręty: {turns_g}",
+                    f"Ryzyko: {new_stats['risk']:.1f} | Zakręty: {new_stats.get('turns', 0)}",
                     fontsize=14, color='white', pad=25)
             else:
                 ax.set_title("BRAK TRASY GLOBALNEJ!", color='red', fontsize=14, pad=25)
             fig.canvas.draw_idle()
             return
 
-        if sim_state["mode"] == "IGNORE" or sim_state.get("obstacle_pos") is None:
+        # ── TRYB PO KLIKNIĘCIU: pełna symulacja ──────────────────────────
+        if sim_state.get("obstacle_pos") is None:
             return
-
-        click_x, click_y = sim_state["obstacle_pos"]
 
         w = risk_slider.val
         m = mass_slider.val
-        a_current = MAX_THRUST_NET_N / m
-
-        current_sensor_range = sensor_range_for_mass(m)
-        processing_delay = processing_delay_for_mass(m)
-
-        col_radius = collision_radius_for_mass(m)
-        phys_radius = drone_radius_for_mass(m)
-        env.update_drone_footprint(phys_radius, col_radius)
-
-        path_global = sim_state["path_global"]
-
-        # ─── ZMIANA: PRZELICZENIE PRĘDKOŚCI DLA NOWEJ MASY ───
-        # To gwarantuje, że "zielona droga" oraz szary plan pierwotny "żyją" i wyginają się poprawnie!
-        global_speeds = compute_path_speeds(path_global, accel=a_current)
-        sim_state["global_speeds"] = global_speeds
-
-        # Aktualizacja samej szarej linii w tle
-        gx_s, gy_s, _ = smooth_path_with_speeds(path_global, global_speeds, accel=a_current)
-        line_global.set_data(gx_s, gy_s)
-        # ──────────────────────────────────────────────────────
-
-        collision_idx = -1
-        for i, (px, py) in enumerate(path_global):
-            if np.sqrt((px - click_x) ** 2 + (py - click_y) ** 2) <= current_sensor_range:
-                collision_idx = i
-                break
-
-        if collision_idx == -1:
-            ax.set_title("KATASTROFA! Zbyt mały zasięg czujnika!", color='red', fontsize=15, fontweight='bold')
-            lc_new_bg.set_segments([])
-            lc_new.set_segments([])
-            sim_state["mode"] = "CRASH"
-            fig.canvas.draw_idle()
+        grid_before = sim_state.get("grid_before_obstacle")
+        if grid_before is None:
             return
 
-        v_detect = float(global_speeds[collision_idx])
-        t_stop = v_detect / a_current
-        t_react = min(processing_delay, t_stop)
-        reaction_distance_meters = (v_detect * t_react) - (0.5 * a_current * (t_react ** 2))
-        reaction_indices = int(np.ceil(reaction_distance_meters))
-        v_react_end = max(0.0, v_detect - a_current * processing_delay)
+        result = _compute_full_scenario(env, start, goal, search_func, w, m,
+                                        sim_state["obstacle_pos"], grid_before)
 
-        drone_detect_idx = collision_idx
-        drone_react_idx = min(drone_detect_idx + reaction_indices, len(path_global) - 1)
-
-        reaction_path = path_global[drone_detect_idx:drone_react_idx + 1]
-        drone_pos = path_global[drone_react_idx]
-
-        # ─── 1. PERFEKCYJNE SKLEJENIE ZIELONEJ I POMARAŃCZOWEJ LINII ───
-        end_idx_ext = min(drone_react_idx + 1 + 2, len(path_global))
-        flown_raw_ext = path_global[:end_idx_ext]
-        f_speeds_ext = global_speeds[:end_idx_ext]
-
-        sx_ext, sy_ext, ss_ext = smooth_path_with_speeds(flown_raw_ext, f_speeds_ext, accel=a_current)
-
-        det_px, det_py = path_global[drone_detect_idx]
-        idx_det = np.argmin((sx_ext - det_px) ** 2 + (sy_ext - det_py) ** 2)
-
-        react_px, react_py = path_global[drone_react_idx]
-        idx_react = np.argmin((sx_ext - react_px) ** 2 + (sy_ext - react_py) ** 2)
-
-        dot_x, dot_y = sx_ext[idx_det], sy_ext[idx_det]
-        end_orange_x, end_orange_y = sx_ext[idx_react], sy_ext[idx_react]
-
-        # Zielona linia (przebyta)
-        sx_green, sy_green, ss_green = sx_ext[:idx_det + 1], sy_ext[:idx_det + 1], ss_ext[:idx_det + 1]
-        if len(sx_green) > 1:
-            pts_f = np.array([sx_green, sy_green]).T.reshape(-1, 1, 2)
-            segs_f = np.concatenate([pts_f[:-1], pts_f[1:]], axis=1)
-            lc_flown_bg.set_segments(segs_f)
-            lc_flown.set_segments(segs_f)
-            lc_flown.set_array((ss_green[:-1] + ss_green[1:]) / 2.0)
-        else:
-            lc_flown_bg.set_segments([])
-            lc_flown.set_segments([])
-
-        # Kropka i pomarańczowa linia
-        drone_marker.set_data([dot_x], [dot_y])
-        line_reaction.set_data(sx_ext[idx_det:idx_react + 1], sy_ext[idx_det:idx_react + 1])
-
-        CRASH_DIST = OBSTACLE_RADIUS + col_radius
-        crash = any(np.sqrt((click_x - px) ** 2 + (click_y - py) ** 2) <= CRASH_DIST for px, py in reaction_path)
-
-        if crash:
-            ax.set_title("KATASTROFA! Zbyt duża bezwładność drona!", color='red', fontsize=15, fontweight='bold')
-            sim_state["mode"] = "CRASH"
-            lc_new_bg.set_segments([])
-            lc_new.set_segments([])
-            fig.canvas.draw_idle()
-            return
-
-        if len(reaction_path) >= 2:
-            last_dx = reaction_path[-1][0] - reaction_path[-2][0]
-            last_dy = reaction_path[-1][1] - reaction_path[-2][1]
-            heading = (int(np.sign(last_dx)), int(np.sign(last_dy)))
-        else:
-            heading = (0, 0)
-
-        buffer_points = []
-        buffer_dist = 0.0
-        if heading != (0, 0) and v_react_end > 0:
-            r_45 = 1.5 / max(0.1, math.sin(math.radians(22.5)))
-            v_safe_ref = max(MIN_TURN_SPEED, math.sqrt(MAX_LATERAL_ACCEL * r_45))
-            v_safe_ref = min(v_safe_ref, V_MAX_MS)
-
-            braking_dist_needed = max(0.0, (v_react_end ** 2 - v_safe_ref ** 2) / (
-                    2 * a_current)) if v_react_end > v_safe_ref else 0.0
-            step_len = math.sqrt(heading[0] ** 2 + heading[1] ** 2)
-            buffer_steps = max(1, int(math.ceil(braking_dist_needed / step_len)))
-
-            for d in range(1, buffer_steps + 1):
-                bp = (drone_pos[0] + heading[0] * d, drone_pos[1] + heading[1] * d)
-                bx, by = int(bp[0]), int(bp[1])
-                if 0 <= bx < env.width and 0 <= by < env.height:
-                    if not env.collision_mask[bx, by]:
-                        buffer_points.append(bp)
-                        buffer_dist += step_len
-                    else:
-                        break
-                else:
-                    break
-
-        v_at_buffer_end = max(0.0, math.sqrt(max(0.0, v_react_end ** 2 - 2 * a_current * buffer_dist)))
-        search_start = buffer_points[-1] if buffer_points else drone_pos
-        sim_state["drone_detect_idx"] = drone_detect_idx
-
-        path_local, stats = search_func(env, search_start, goal, risk_weight=w,
-                                        turn_penalty=TURN_PENALTY, drone_radius=col_radius,
-                                        initial_direction=heading,
-                                        current_speed=v_at_buffer_end,
-                                        initial_straight_dist=buffer_dist,
-                                        drone_mass=m)
-
-        if path_local and stats['found']:
-            sim_state["target_pos"] = goal
-            sim_state["mode"] = "NORMAL"
-        else:
-            path_local, stats = search_func(env, search_start, start, risk_weight=40.0,
-                                            turn_penalty=TURN_PENALTY, drone_radius=col_radius,
-                                            initial_direction=heading,
-                                            current_speed=v_at_buffer_end,
-                                            initial_straight_dist=buffer_dist,
-                                            drone_mass=m)
-            sim_state["target_pos"] = start
-            sim_state["mode"] = "RTH"
-
-        if path_local and stats.get('found'):
-            if buffer_points:
-                full_new_path = [drone_pos] + buffer_points + path_local[1:]
-            else:
-                full_new_path = path_local
-
-            speeds = compute_path_speeds(full_new_path, initial_speed=v_react_end, accel=a_current)
-
-            artificial_lead_in = []
-            if heading != (0, 0):
-                p1 = (drone_pos[0] - heading[0] * 2.0, drone_pos[1] - heading[1] * 2.0)
-                p2 = (drone_pos[0] - heading[0] * 1.0, drone_pos[1] - heading[1] * 1.0)
-                artificial_lead_in = [p1, p2]
-
-            # ─── 2. PERFEKCYJNE SKLEJENIE NOWEJ TRASY Z POMARAŃCZOWĄ LINIĄ ───
-            if artificial_lead_in:
-                combined_path = artificial_lead_in + full_new_path
-                lead_speeds = np.full(len(artificial_lead_in), v_react_end)
-                combined_speeds = np.concatenate([lead_speeds, speeds])
-
-                sx, sy, s_speeds = smooth_path_with_speeds(combined_path, combined_speeds, accel=a_current)
-
-                search_limit = min(len(sx), 60)
-                distances = (sx[:search_limit] - react_px) ** 2 + (sy[:search_limit] - react_py) ** 2
-                best_idx = np.argmin(distances)
-
-                sx = sx[best_idx:]
-                sy = sy[best_idx:]
-                s_speeds = s_speeds[best_idx:]
-
-                sx[0] = end_orange_x
-                sy[0] = end_orange_y
-            else:
-                sx, sy, s_speeds = smooth_path_with_speeds(full_new_path, speeds, accel=a_current)
-                sx[0] = end_orange_x
-                sy[0] = end_orange_y
-
-            points = np.array([sx, sy]).T.reshape(-1, 1, 2)
-            segments = np.concatenate([points[:-1], points[1:]], axis=1)
-
-            lc_new_bg.set_segments(segments)
-            lc_new.set_segments(segments)
-            lc_new.set_array((s_speeds[:-1] + s_speeds[1:]) / 2.0)
-
-            # ─── ZMIANA: PRZELICZENIE STATYSTYK DROGI PRZEBYTEJ ───
-            flown_path_for_stats = path_global[:drone_detect_idx + 1]
-            sim_state["flown_dist"] = calculate_path_length(flown_path_for_stats)
-            sim_state["flown_time"] = calculate_kinematic_flight_time(flown_path_for_stats, mass=m)
-            sim_state["flown_risk"] = calculate_segment_risk(flown_path_for_stats, env)
-
-            actual_flown_turns = 0
-            if len(flown_path_for_stats) > 2:
-                last_dir = (flown_path_for_stats[1][0] - flown_path_for_stats[0][0],
-                            flown_path_for_stats[1][1] - flown_path_for_stats[0][1])
-                for i in range(2, len(flown_path_for_stats)):
-                    curr_dir = (flown_path_for_stats[i][0] - flown_path_for_stats[i - 1][0],
-                                flown_path_for_stats[i][1] - flown_path_for_stats[i - 1][1])
-                    if curr_dir != last_dir:
-                        actual_flown_turns += 1
-                        last_dir = curr_dir
-            sim_state["flown_turns"] = actual_flown_turns
-            # ───────────────────────────────────────────────────────
-
-            actual_new_dist = calculate_path_length(full_new_path)
-            t_dist = sim_state["flown_dist"] + actual_new_dist
-
-            f_turns = 0
-            if len(full_new_path) > 2:
-                last_dir = (full_new_path[1][0] - full_new_path[0][0],
-                            full_new_path[1][1] - full_new_path[0][1])
-                for i in range(2, len(full_new_path)):
-                    curr_dir = (full_new_path[i][0] - full_new_path[i - 1][0],
-                                full_new_path[i][1] - full_new_path[i - 1][1])
-                    if curr_dir != last_dir:
-                        f_turns += 1
-                        last_dir = curr_dir
-
-            t_time = sim_state["flown_time"] + calculate_kinematic_flight_time(full_new_path, mass=m)
-            t_risk = sim_state["flown_risk"] + calculate_segment_risk(full_new_path, env)
-            t_turns = sim_state["flown_turns"] + f_turns
-
-            # Przelicz baseline z aktualną masą (oryginalna trasa BEZ przeszkody dynamicznej)
-            orig_path = sim_state["path_global_original"]
-            base_dist = calculate_path_length(orig_path)
-            base_time = calculate_kinematic_flight_time(orig_path, mass=m)
-            grid_orig = sim_state.get("grid_before_obstacle", env.grid)
-            phys_r = drone_radius_for_mass(m)
-            base_risk = _compute_baseline_risk(orig_path, grid_orig, phys_r)
-            base_turns_count = 0
-            if len(orig_path) > 2:
-                _ld = (orig_path[1][0] - orig_path[0][0], orig_path[1][1] - orig_path[0][1])
-                for _i in range(2, len(orig_path)):
-                    _cd = (orig_path[_i][0] - orig_path[_i-1][0], orig_path[_i][1] - orig_path[_i-1][1])
-                    if _cd != _ld:
-                        base_turns_count += 1
-                        _ld = _cd
-
-            d_dist = t_dist - base_dist
-            d_time = t_time - base_time
-            d_risk = t_risk - base_risk
-            d_turns = t_turns - base_turns_count
-
-            fmt = lambda v: f"+{v:.1f}" if v > 0 else f"{v:.1f}"
-            fmt_i = lambda v: f"+{int(v)}" if v > 0 else f"{int(v)}"
-
-            stats_text = (f"Droga: {t_dist:.1f} m ({fmt(d_dist)} m nadłożono)\n"
-                          f"Czas: {t_time:.1f}s ({fmt(d_time)}) | Ryzyko: {t_risk:.1f} ({fmt(d_risk)}) | "
-                          f"Zakręty: {t_turns} ({fmt_i(d_turns)})")
-
-            if sim_state["mode"] == "RTH":
-                dr = drone_radius_for_mass(m)
-                ax.set_title(
-                    f"Risk-Aware A* — Tryb Powrotu (W=40, m={m:.0f} kg, r={dr:.2f} m, a={a_current:.1f} m/s²)\n{stats_text}",
-                    color='orange', fontsize=14, pad=25)
-                lc_new.set_cmap(get_speed_cmap())
-                line_proxy.set_color('orange')
-            else:
-                dr = drone_radius_for_mass(m)
-                ax.set_title(
-                    f"Risk-Aware A* — Omijanie (W={w:.0f}, m={m:.0f} kg, r={dr:.2f} m, a={a_current:.1f} m/s²)\n{stats_text}",
-                    color='lime', fontsize=14, pad=25)
-                lc_new.set_cmap(get_speed_cmap())
-                line_proxy.set_color('cyan')
-        else:
-            ax.set_title("DRON JEST UWIĘZIONY!", color='red', fontsize=14, pad=25)
-            lc_new_bg.set_segments([])
-            lc_new.set_segments([])
+        _draw_scenario(result, ax, lc_flown_bg, lc_flown, line_reaction, drone_marker,
+                       lc_new_bg, lc_new, line_global, "Risk-Aware A*", 'lime', w, m)
         fig.canvas.draw_idle()
 
     risk_slider.on_changed(update_route)
@@ -632,212 +720,24 @@ def run_online_simulation(
         if event.inaxes != ax or sim_state["clicked"]:
             return
 
-        path_global = sim_state["path_global"]
-        global_speeds = sim_state["global_speeds"]
-
         click_x, click_y = int(event.xdata), int(event.ydata)
         sim_state["obstacle_pos"] = (click_x, click_y)
         sim_state["grid_before_obstacle"] = env.grid.copy()
         env.add_dynamic_risk_zone(click_x, click_y, radius=OBSTACLE_RADIUS)
         img.set_data(env.grid.T)
 
-        onclick_mass_early = mass_slider.val
-        onclick_col_r_early = collision_radius_for_mass(onclick_mass_early)
-        onclick_phys_r_early = drone_radius_for_mass(onclick_mass_early)
-        DRONE_RADIUS = onclick_phys_r_early
-        CRASH_DIST = OBSTACLE_RADIUS + onclick_col_r_early
-
-        is_path_blocked = any(
-            np.sqrt((px - click_x) ** 2 + (py - click_y) ** 2) <= CRASH_DIST
-            for px, py in path_global
-        )
-
-        if not is_path_blocked:
-            print("\n-> Obiekt poza kursem kolizyjnym. Dron ignoruje zagrożenie.")
-            ax.set_title("Zagrożenie poza kursem lotu. Brak reakcji.", color='lime', fontsize=14, pad=25)
-            sx_f, sy_f, ss_f = smooth_path_with_speeds(path_global, global_speeds)
-            pts = np.array([sx_f, sy_f]).T.reshape(-1, 1, 2)
-            segs = np.concatenate([pts[:-1], pts[1:]], axis=1)
-            lc_flown_bg.set_segments(segs)
-            lc_flown.set_segments(segs)
-            lc_flown.set_array((ss_f[:-1] + ss_f[1:]) / 2.0)
-            sim_state["clicked"] = True
-            sim_state["mode"] = "IGNORE"
-            fig.canvas.draw()
-            return
-
-        onclick_mass = mass_slider.val
-        current_sensor_range = sensor_range_for_mass(onclick_mass)
-        processing_delay = processing_delay_for_mass(onclick_mass)
-        onclick_accel = MAX_THRUST_NET_N / onclick_mass
-
-        collision_idx = -1
-        for i, (px, py) in enumerate(path_global):
-            if np.sqrt((px - click_x) ** 2 + (py - click_y) ** 2) <= current_sensor_range:
-                collision_idx = i
-                break
-
-        if collision_idx == -1:
-            return
-
-        v_detect = float(global_speeds[collision_idx])
-        print(f"\n-> WYKRYTO ZAGROŻENIE! Prędkość: {v_detect:.1f} m/s")
-
-        t_stop = v_detect / onclick_accel
-        t_react = min(processing_delay, t_stop)
-        reaction_distance_meters = (v_detect * t_react) - (0.5 * onclick_accel * (t_react ** 2))
-        reaction_indices = int(np.ceil(reaction_distance_meters))
-        v_react_end = max(0.0, v_detect - onclick_accel * processing_delay)
-        print(f"-> Po reakcji ({processing_delay}s): {reaction_distance_meters:.1f}m, v={v_react_end:.1f} m/s")
-
-        drone_detect_idx = collision_idx
-        drone_react_idx = min(drone_detect_idx + reaction_indices, len(path_global) - 1)
-        reaction_path = path_global[drone_detect_idx:drone_react_idx + 1]
-        current_drone_pos = path_global[drone_react_idx]
-
-        # ─── 3. PERFEKCYJNE RYSOWANIE CRASH-U W ONCLICK ───
-        end_idx_ext = min(drone_react_idx + 1 + 2, len(path_global))
-        flown_raw_ext = path_global[:end_idx_ext]
-        f_speeds_ext = global_speeds[:end_idx_ext]
-
-        sx_ext, sy_ext, ss_ext = smooth_path_with_speeds(flown_raw_ext, f_speeds_ext, accel=onclick_accel)
-
-        det_px, det_py = path_global[drone_detect_idx]
-        idx_det = np.argmin((sx_ext - det_px) ** 2 + (sy_ext - det_py) ** 2)
-
-        react_px, react_py = path_global[drone_react_idx]
-        idx_react = np.argmin((sx_ext - react_px) ** 2 + (sy_ext - react_py) ** 2)
-
-        drone_marker.set_data([sx_ext[idx_det]], [sy_ext[idx_det]])
-        line_reaction.set_data(sx_ext[idx_det:idx_react + 1], sy_ext[idx_det:idx_react + 1])
-
-        sx_green, sy_green, ss_green = sx_ext[:idx_det + 1], sy_ext[:idx_det + 1], ss_ext[:idx_det + 1]
-        if len(sx_green) > 1:
-            pts_f = np.array([sx_green, sy_green]).T.reshape(-1, 1, 2)
-            segs_f = np.concatenate([pts_f[:-1], pts_f[1:]], axis=1)
-            lc_flown_bg.set_segments(segs_f)
-            lc_flown.set_segments(segs_f)
-            lc_flown.set_array((ss_green[:-1] + ss_green[1:]) / 2.0)
-
-        if len(reaction_path) >= 2:
-            last_dx = reaction_path[-1][0] - reaction_path[-2][0]
-            last_dy = reaction_path[-1][1] - reaction_path[-2][1]
-            flight_heading = (int(np.sign(last_dx)), int(np.sign(last_dy)))
-        else:
-            flight_heading = (0, 0)
-
-        onclick_col_r = collision_radius_for_mass(onclick_mass)
-
-        buffer_points = []
-        buffer_dist = 0.0
-        if flight_heading != (0, 0):
-            r_45 = 1.5 / max(0.1, math.sin(math.radians(22.5)))
-            v_safe_ref = max(MIN_TURN_SPEED, math.sqrt(MAX_LATERAL_ACCEL * r_45))
-            v_safe_ref = min(v_safe_ref, V_MAX_MS)
-
-            braking_dist_needed = max(0.0, (v_react_end ** 2 - v_safe_ref ** 2) / (2 * onclick_accel)) \
-                if v_react_end > v_safe_ref else 0.0
-
-            step_len = math.sqrt(flight_heading[0] ** 2 + flight_heading[1] ** 2)
-            buffer_steps = max(1, int(math.ceil(braking_dist_needed / step_len)))
-
-            for d in range(1, buffer_steps + 1):
-                bp = (current_drone_pos[0] + flight_heading[0] * d,
-                      current_drone_pos[1] + flight_heading[1] * d)
-                bx, by = int(bp[0]), int(bp[1])
-                if 0 <= bx < env.width and 0 <= by < env.height:
-                    if not env.is_collision(bx, by, drone_radius=onclick_col_r):
-                        buffer_points.append(bp)
-                        buffer_dist += step_len
-                    else:
-                        break
-                else:
-                    break
-
-        v_at_buffer_end = max(0.0, math.sqrt(max(0.0, v_react_end ** 2 - 2 * onclick_accel * buffer_dist)))
-
-        sim_state["drone_pos"] = current_drone_pos
-        sim_state["buffer_points"] = buffer_points
-        sim_state["heading"] = flight_heading
-        sim_state["drone_speed"] = v_at_buffer_end
-        sim_state["visual_speed"] = v_react_end
-        sim_state["buffer_dist"] = buffer_dist
-        sim_state["drone_detect_idx"] = drone_detect_idx
-        sim_state["click_mass"] = mass_slider.val
-
-        flown_full = path_global[:drone_react_idx + 1]
-        sim_state["flown_dist"] = calculate_path_length(flown_full)
-        sim_state["flown_time"] = calculate_kinematic_flight_time(flown_full, mass=onclick_mass)
-        sim_state["flown_risk"] = calculate_segment_risk(flown_full, env)
-
-        f_turns = 0
-        if len(flown_full) > 2:
-            last_dir = (flown_full[1][0] - flown_full[0][0], flown_full[1][1] - flown_full[0][1])
-            for i in range(2, len(flown_full)):
-                curr_dir = (flown_full[i][0] - flown_full[i - 1][0], flown_full[i][1] - flown_full[i - 1][1])
-                if curr_dir != last_dir:
-                    f_turns += 1
-                    last_dir = curr_dir
-        sim_state["flown_turns"] = f_turns
-
-        crash = any(
-            np.sqrt((click_x - px) ** 2 + (click_y - py) ** 2) <= (OBSTACLE_RADIUS + DRONE_RADIUS)
-            for px, py in reaction_path
-        )
-
-        if crash:
-            ax.set_title("KATASTROFA! Zbyt późna reakcja!", color='red', fontsize=15, fontweight='bold')
-            sim_state["clicked"] = True
-            sim_state["mode"] = "CRASH"
-            fig.canvas.draw()
-            return
-
         sim_state["clicked"] = True
 
-        search_start = sim_state["buffer_points"][-1] if sim_state.get("buffer_points") else sim_state["drone_pos"]
-        click_m = mass_slider.val
-        click_col_r = collision_radius_for_mass(click_m)
-        click_phys_r = drone_radius_for_mass(click_m)
-        env.update_drone_footprint(click_phys_r, click_col_r)
+        # Pierwsze rysowanie Risk-Aware
+        update_route(risk_slider.val)
 
-        path_check, _ = search_func(env, search_start, goal, risk_weight=risk_slider.val,
-                                    turn_penalty=TURN_PENALTY, drone_radius=click_col_r,
-                                    initial_direction=flight_heading, current_speed=v_at_buffer_end,
-                                    initial_straight_dist=buffer_dist,
-                                    drone_mass=click_m)
-
-        if path_check:
-            sim_state["target_pos"] = goal
-            sim_state["mode"] = "NORMAL"
-            line_proxy.set_label('Replanowana Trasa')
-        else:
-            sim_state["target_pos"] = start
-            sim_state["mode"] = "RTH"
-            goal_marker.set_facecolor('gray')
-            line_proxy.set_label('Powrót (Awaryjny)')
-            risk_slider.set_val(40.0)
-
-        if sim_state["mode"] == "NORMAL":
-            update_route(risk_slider.val)
-
+        # Otwórz okna Dijkstra i A*
         if func_dijkstra is not None and func_astar is not None:
             _open_comparison_windows(
                 env=env, start=start, goal=goal,
-                path_global=path_global, global_speeds=global_speeds,
-                click_x=click_x, click_y=click_y,
-                obstacle_radius=OBSTACLE_RADIUS,
-                drone_radius=DRONE_RADIUS,
-                collision_radius=collision_radius,
-                drone_detect_idx=drone_detect_idx,
-                drone_react_idx=drone_react_idx,
-                reaction_path=reaction_path,
-                current_drone_pos=current_drone_pos,
-                flight_heading=flight_heading,
-                v_detect=v_detect,
-                v_react_end=v_react_end,
+                sim_state=sim_state,
                 func_dijkstra=func_dijkstra,
                 func_astar=func_astar,
-                sim_state=sim_state,
                 init_w=risk_slider.val,
                 init_mass=mass_slider.val,
             )
@@ -852,13 +752,9 @@ def run_online_simulation(
 
 
 def _open_comparison_windows(
-        env, start, goal, path_global, global_speeds,
-        click_x, click_y, obstacle_radius, drone_radius,
-        collision_radius, drone_detect_idx, drone_react_idx,
-        reaction_path, current_drone_pos, flight_heading,
-        v_detect, v_react_end,
+        env, start, goal,
+        sim_state,
         func_dijkstra, func_astar,
-        sim_state=None,
         init_w=RISK_WEIGHT,
         init_mass=DRONE_MASS_KG
 ) -> None:
@@ -885,29 +781,17 @@ def _open_comparison_windows(
                             speed_axes_rect=[0.155, 0.13, 0.59, 0.02],
                             risk_fraction=0.048, risk_pad=0.045, risk_shrink=0.72)
 
-        # Oryginalna trasa (szara przerywana)
-        gx_s, gy_s = smooth_path_bspline(path_global)
-        ax_cmp.plot(gx_s, gy_s, color='gray', linestyle='--', linewidth=2, alpha=0.5,
-                    label='Pierwotny Plan')
+        # Oryginalna trasa (szara przerywana) — dynamiczna
+        gx_s, gy_s = smooth_path_bspline(sim_state["path_global"])
+        global_line_cmp, = ax_cmp.plot(gx_s, gy_s, color='gray', linestyle='--', linewidth=2, alpha=0.5,
+                                       label='Pierwotny Plan')
 
-        # Droga przebyta (do wykrycia) — dynamiczna, aktualizowana suwakiem masy
-        flown_raw = path_global[:drone_detect_idx + 1]
-        f_speeds = global_speeds[:drone_detect_idx + 1]
+        # Droga przebyta — dynamiczna
         lc_f_bg = LineCollection([], colors='#555555', linewidths=7, alpha=0.4, zorder=3)
         lc_f = LineCollection([], cmap=get_speed_cmap(), norm=plt.Normalize(0, V_MAX_MS),
                               linewidths=5, zorder=4)
         ax_cmp.add_collection(lc_f_bg)
         ax_cmp.add_collection(lc_f)
-
-        if len(flown_raw) >= 2:
-            sx_f, sy_f, ss_f = smooth_path_with_speeds(flown_raw, f_speeds)
-            pts_f = np.array([sx_f, sy_f]).T.reshape(-1, 1, 2)
-            segs_f = np.concatenate([pts_f[:-1], pts_f[1:]], axis=1)
-            lc_f_bg.set_segments(segs_f)
-            lc_f.set_segments(segs_f)
-            lc_f.set_array((ss_f[:-1] + ss_f[1:]) / 2.0)
-
-        # === POPRAWIONE WCIĘCIE: Kod poniżej "if" wraca na właściwy poziom ===
 
         # Czas reakcji (pomarańczowa) i Punkt wykrycia przypisujemy do zmiennych
         line_reaction_cmp, = ax_cmp.plot([], [], color='orange', linestyle=':', linewidth=4, label='Czas Reakcji',
@@ -946,302 +830,32 @@ def _open_comparison_windows(
         mass_slider_cmp.valtext.set_color('white')
 
         def make_update(ax_ref, lc_bg_ref, lc_ref, lc_f_bg_ref, lc_f_ref,
-                        path_global_ref, global_speeds_ref, func_ref, name_ref, clr_ref,
-                        w_slider, m_slider, sim_st, react_line, dot_line):
+                        func_ref, name_ref, clr_ref,
+                        w_slider, m_slider, sim_st, react_line, dot_line, gline_ref):
             def update_cmp(val):
                 w = w_slider.val
                 m = m_slider.val
-                a_val = MAX_THRUST_NET_N / m
-
-                if sim_st.get("obstacle_pos") is None: return
-                cx, cy = sim_st["obstacle_pos"]
-
-                # Dynamiczna detekcja w oknach pobocznych!
-                current_sensor_range = sensor_range_for_mass(m)
-                processing_delay = processing_delay_for_mass(m)
-                col_r = collision_radius_for_mass(m)
-                phys_r = drone_radius_for_mass(m)
-                env.update_drone_footprint(phys_r, col_r)
-
-                c_idx = -1
-                for i, (px, py) in enumerate(path_global_ref):
-                    if np.sqrt((px - cx) ** 2 + (py - cy) ** 2) <= current_sensor_range:
-                        c_idx = i
-                        break
-
-                if c_idx == -1:
-                    ax_ref.set_title("KATASTROFA! Zbyt mały zasięg czujnika!", color='red', fontsize=14, pad=25)
-                    lc_bg_ref.set_segments([])
-                    lc_ref.set_segments([])
-                    react_line.set_data([], [])
-                    dot_line.set_data([], [])
-                    ax_ref.figure.canvas.draw_idle()
+                if sim_st.get("obstacle_pos") is None:
+                    return
+                grid_before = sim_st.get("grid_before_obstacle")
+                if grid_before is None:
                     return
 
-                v_det = float(global_speeds_ref[c_idx])
-                t_stop = v_det / a_val
-                t_react = min(processing_delay, t_stop)
-                react_dist = (v_det * t_react) - (0.5 * a_val * (t_react ** 2))
-                react_idx_count = int(np.ceil(react_dist))
-                v_react_end = max(0.0, v_det - a_val * processing_delay)
+                result = _compute_full_scenario(env, start, goal, func_ref, w, m,
+                                                sim_st["obstacle_pos"], grid_before,
+                                                use_buffer=False)
 
-                det_idx = c_idx
-                react_idx = min(det_idx + react_idx_count, len(path_global_ref) - 1)
-
-                react_path = path_global_ref[det_idx:react_idx + 1]
-                cur_drone_pos = path_global_ref[react_idx]
-
-                react_line.set_data([p[0] for p in react_path], [p[1] for p in react_path])
-                dot_line.set_data([path_global_ref[det_idx][0]], [path_global_ref[det_idx][1]])
-
-                CRASH_DIST = OBSTACLE_RADIUS + col_r
-                if any(np.sqrt((cx - px) ** 2 + (cy - py) ** 2) <= CRASH_DIST for px, py in react_path):
-                    ax_ref.set_title("KATASTROFA! Zbyt duża bezwładność drona!", color='red', fontsize=14, pad=25)
-                    lc_bg_ref.set_segments([])
-                    lc_ref.set_segments([])
-                    ax_ref.figure.canvas.draw_idle()
-                    return
-
-                # Rysowanie ogona z mechanicznym "przyklejaniem"
-                if det_idx > 0:
-                    full_spd = compute_path_speeds(path_global_ref, accel=a_val)
-                    end_idx = min(det_idx + 1 + 2, len(path_global_ref))
-                    ext_raw = path_global_ref[:end_idx]
-                    ext_spd = full_spd[:end_idx]
-                    sx_fl, sy_fl, ss_fl = smooth_path_with_speeds(ext_raw, ext_spd, accel=a_val)
-
-                    detect_px, detect_py = path_global_ref[det_idx]
-                    dists_fl = (sx_fl - detect_px) ** 2 + (sy_fl - detect_py) ** 2
-                    best_fl_idx = np.argmin(dists_fl)
-
-                    sx_fl = np.concatenate((sx_fl[:best_fl_idx], [detect_px]))
-                    sy_fl = np.concatenate((sy_fl[:best_fl_idx], [detect_py]))
-                    ss_fl = np.concatenate((ss_fl[:best_fl_idx], [ss_fl[best_fl_idx]]))
-
-                    if len(sx_fl) > 1:
-                        pts_fl = np.array([sx_fl, sy_fl]).T.reshape(-1, 1, 2)
-                        segs_fl = np.concatenate([pts_fl[:-1], pts_fl[1:]], axis=1)
-                        lc_f_bg_ref.set_segments(segs_fl)
-                        lc_f_ref.set_segments(segs_fl)
-                        lc_f_ref.set_array((ss_fl[:-1] + ss_fl[1:]) / 2.0)
-                    else:
-                        lc_f_bg_ref.set_segments([])
-                        lc_f_ref.set_segments([])
-
-                if len(react_path) >= 2:
-                    last_dx = react_path[-1][0] - react_path[-2][0]
-                    last_dy = react_path[-1][1] - react_path[-2][1]
-                    f_heading = (int(np.sign(last_dx)), int(np.sign(last_dy)))
-                else:
-                    f_heading = (0, 0)
-
-                path_replan, stats_replan = func_ref(env, cur_drone_pos, goal, risk_weight=w,
-                                                     turn_penalty=TURN_PENALTY, drone_radius=col_r,
-                                                     initial_direction=f_heading, current_speed=v_react_end,
-                                                     drone_mass=m)
-
-                if path_replan and stats_replan['found']:
-                    artificial_lead_in = []
-                    if f_heading != (0, 0):
-                        p1 = (cur_drone_pos[0] - f_heading[0] * 2.0, cur_drone_pos[1] - f_heading[1] * 2.0)
-                        p2 = (cur_drone_pos[0] - f_heading[0] * 1.0, cur_drone_pos[1] - f_heading[1] * 1.0)
-                        artificial_lead_in = [p1, p2]
-
-                    speeds_r_raw = compute_path_speeds(path_replan, initial_speed=v_react_end, accel=a_val)
-
-                    if artificial_lead_in:
-                        combined_path = artificial_lead_in + path_replan
-                        lead_speeds = np.full(len(artificial_lead_in), v_react_end)
-                        combined_speeds = np.concatenate([lead_speeds, speeds_r_raw])
-
-                        sx_r, sy_r, ss_r = smooth_path_with_speeds(combined_path, combined_speeds, accel=a_val)
-
-                        start_px, start_py = cur_drone_pos
-                        search_limit = min(len(sx_r), 60)
-                        dists_r = (sx_r[:search_limit] - start_px) ** 2 + (sy_r[:search_limit] - start_py) ** 2
-                        best_idx = np.argmin(dists_r)
-
-                        # CZYSTE CIĘCIE ZAMIAST CONCATENATE
-                        sx_r = sx_r[best_idx:]
-                        sy_r = sy_r[best_idx:]
-                        ss_r = ss_r[best_idx:]
-
-                        sx_r[0] = start_px
-                        sy_r[0] = start_py
-                    else:
-                        sx_r, sy_r, ss_r = smooth_path_with_speeds(path_replan, speeds_r_raw, accel=a_val)
-                        start_px, start_py = cur_drone_pos
-                        sx_r[0] = start_px
-                        sy_r[0] = start_py
-
-                    pts_r = np.array([sx_r, sy_r]).T.reshape(-1, 1, 2)
-                    segs_r = np.concatenate([pts_r[:-1], pts_r[1:]], axis=1)
-
-                    lc_bg_ref.set_segments(segs_r)
-                    lc_ref.set_segments(segs_r)
-                    lc_ref.set_array((ss_r[:-1] + ss_r[1:]) / 2.0)
-
-                    # Dynamiczne przeliczanie drogi przebytej (start → react) z aktualną masą
-                    flown_path_cmp = list(path_global_ref[:react_idx + 1])
-                    flown_dist_cmp = calculate_path_length(flown_path_cmp)
-                    flown_time_cmp = calculate_kinematic_flight_time(flown_path_cmp, mass=m)
-                    flown_risk_cmp = calculate_segment_risk(flown_path_cmp, env)
-                    flown_turns_cmp = 0
-                    if len(flown_path_cmp) > 2:
-                        _ld = (flown_path_cmp[1][0] - flown_path_cmp[0][0],
-                               flown_path_cmp[1][1] - flown_path_cmp[0][1])
-                        for _i in range(2, len(flown_path_cmp)):
-                            _cd = (flown_path_cmp[_i][0] - flown_path_cmp[_i-1][0],
-                                   flown_path_cmp[_i][1] - flown_path_cmp[_i-1][1])
-                            if _cd != _ld:
-                                flown_turns_cmp += 1
-                                _ld = _cd
-
-                    t_dist = flown_dist_cmp + calculate_path_length(path_replan)
-                    t_time = flown_time_cmp + calculate_kinematic_flight_time(path_replan, mass=m)
-                    t_risk = flown_risk_cmp + calculate_segment_risk(path_replan, env)
-                    t_turns = flown_turns_cmp + stats_replan.get('turns', 0)
-
-                    # Przelicz baseline z aktualną masą (BEZ przeszkody dynamicznej)
-                    orig_path = sim_st.get("path_global_original", path_global_ref)
-                    b_dist = calculate_path_length(orig_path)
-                    b_time = calculate_kinematic_flight_time(orig_path, mass=m)
-                    grid_orig = sim_st.get("grid_before_obstacle", env.grid)
-                    phys_r = drone_radius_for_mass(m)
-                    b_risk = _compute_baseline_risk(orig_path, grid_orig, phys_r)
-                    b_turns = 0
-                    if len(orig_path) > 2:
-                        _ld2 = (orig_path[1][0] - orig_path[0][0], orig_path[1][1] - orig_path[0][1])
-                        for _i2 in range(2, len(orig_path)):
-                            _cd2 = (orig_path[_i2][0] - orig_path[_i2-1][0], orig_path[_i2][1] - orig_path[_i2-1][1])
-                            if _cd2 != _ld2:
-                                b_turns += 1
-                                _ld2 = _cd2
-
-                    d_dist = t_dist - b_dist
-                    d_time = t_time - b_time
-                    d_risk = t_risk - b_risk
-                    d_turns = t_turns - b_turns
-
-                    fmt = lambda v: f"+{v:.1f}" if v > 0 else f"{v:.1f}"
-                    fmt_i = lambda v: f"+{int(v)}" if v > 0 else f"{int(v)}"
-
-                    dr = drone_radius_for_mass(m)
-                    ax_ref.set_title(
-                        f"{name_ref} — Omijanie (W={w:.0f}, m={m:.0f} kg, r={dr:.2f} m, a={a_val:.1f} m/s²)\n"
-                        f"Droga: {t_dist:.1f} m ({fmt(d_dist)} m nadłożono)\n"
-                        f"Czas: {t_time:.1f}s ({fmt(d_time)}) | Ryzyko: {t_risk:.1f} ({fmt(d_risk)}) | "
-                        f"Zakręty: {t_turns} ({fmt_i(d_turns)})",
-                        fontsize=14, color=clr_ref, pad=25)
-                else:
-                    if w_slider.val != 40.0:
-                        w_slider.set_val(40.0)
-                        return
-                    path_rth, stats_rth = func_ref(env, cur_drone_pos, start, risk_weight=40.0,
-                                                   turn_penalty=TURN_PENALTY, drone_radius=col_r,
-                                                   initial_direction=f_heading, current_speed=v_react_end, drone_mass=m)
-                    if path_rth and stats_rth['found']:
-                        artificial_lead_in = []
-                        if f_heading != (0, 0):
-                            p1 = (cur_drone_pos[0] - f_heading[0] * 2.0, cur_drone_pos[1] - f_heading[1] * 2.0)
-                            p2 = (cur_drone_pos[0] - f_heading[0] * 1.0, cur_drone_pos[1] - f_heading[1] * 1.0)
-                            artificial_lead_in = [p1, p2]
-
-                        speeds_rth_raw = compute_path_speeds(path_rth, initial_speed=v_react_end, accel=a_val)
-
-                        if artificial_lead_in:
-                            combined_path = artificial_lead_in + path_rth
-                            lead_speeds = np.full(len(artificial_lead_in), v_react_end)
-                            combined_speeds = np.concatenate([lead_speeds, speeds_rth_raw])
-
-                            sx_rth, sy_rth, ss_rth = smooth_path_with_speeds(combined_path, combined_speeds,
-                                                                             accel=a_val)
-
-                            start_px, start_py = cur_drone_pos
-                            search_limit = min(len(sx_rth), 60)
-                            dists_rth = (sx_rth[:search_limit] - start_px) ** 2 + (
-                                        sy_rth[:search_limit] - start_py) ** 2
-                            best_idx = np.argmin(dists_rth)
-
-                            # CZYSTE CIĘCIE
-                            sx_rth = sx_rth[best_idx:]
-                            sy_rth = sy_rth[best_idx:]
-                            ss_rth = ss_rth[best_idx:]
-
-                            # --- DODANE: IDEALNE ZSZYCIE ---
-                            sx_rth[0] = start_px
-                            sy_rth[0] = start_py
-                        else:
-                            sx_rth, sy_rth, ss_rth = smooth_path_with_speeds(path_rth, speeds_rth_raw, accel=a_val)
-                            # --- DODANE: IDEALNE ZSZYCIE ---
-                            start_px, start_py = cur_drone_pos
-                            sx_rth[0] = start_px
-                            sy_rth[0] = start_py
-
-                        pts_rth = np.array([sx_rth, sy_rth]).T.reshape(-1, 1, 2)
-                        segs_rth = np.concatenate([pts_rth[:-1], pts_rth[1:]], axis=1)
-                        lc_bg_ref.set_segments(segs_rth)
-                        lc_ref.set_segments(segs_rth)
-                        lc_ref.set_array((ss_rth[:-1] + ss_rth[1:]) / 2.0)
-
-                        # Dynamiczne przeliczenie statystyk RTH
-                        flown_path_rth = list(path_global_ref[:react_idx + 1])
-                        flown_dist_rth = calculate_path_length(flown_path_rth)
-                        flown_time_rth = calculate_kinematic_flight_time(flown_path_rth, mass=m)
-                        flown_risk_rth = calculate_segment_risk(flown_path_rth, env)
-                        flown_turns_rth = 0
-                        if len(flown_path_rth) > 2:
-                            _ld = (flown_path_rth[1][0] - flown_path_rth[0][0],
-                                   flown_path_rth[1][1] - flown_path_rth[0][1])
-                            for _i in range(2, len(flown_path_rth)):
-                                _cd = (flown_path_rth[_i][0] - flown_path_rth[_i-1][0],
-                                       flown_path_rth[_i][1] - flown_path_rth[_i-1][1])
-                                if _cd != _ld:
-                                    flown_turns_rth += 1
-                                    _ld = _cd
-
-                        t_dist = flown_dist_rth + calculate_path_length(path_rth)
-                        t_time = flown_time_rth + calculate_kinematic_flight_time(path_rth, mass=m)
-                        t_risk = flown_risk_rth + calculate_segment_risk(path_rth, env)
-                        t_turns = flown_turns_rth + stats_rth.get('turns', 0)
-
-                        orig_path = sim_st.get("path_global_original", path_global_ref)
-                        b_dist = calculate_path_length(orig_path)
-                        b_time = calculate_kinematic_flight_time(orig_path, mass=m)
-                        grid_orig = sim_st.get("grid_before_obstacle", env.grid)
-                        phys_r = drone_radius_for_mass(m)
-                        b_risk = _compute_baseline_risk(orig_path, grid_orig, phys_r)
-                        b_turns = 0
-                        if len(orig_path) > 2:
-                            _ld2 = (orig_path[1][0] - orig_path[0][0], orig_path[1][1] - orig_path[0][1])
-                            for _i2 in range(2, len(orig_path)):
-                                _cd2 = (orig_path[_i2][0] - orig_path[_i2-1][0], orig_path[_i2][1] - orig_path[_i2-1][1])
-                                if _cd2 != _ld2:
-                                    b_turns += 1
-                                    _ld2 = _cd2
-
-                        fmt = lambda v: f"+{v:.1f}" if v > 0 else f"{v:.1f}"
-                        fmt_i = lambda v: f"+{int(v)}" if v > 0 else f"{int(v)}"
-
-                        dr = drone_radius_for_mass(m)
-                        ax_ref.set_title(
-                            f"{name_ref} — Tryb Powrotu (W=40, m={m:.0f} kg, r={dr:.2f} m, a={a_val:.1f} m/s²)\n"
-                            f"Droga: {t_dist:.1f} m ({fmt(t_dist - b_dist)} m nadłożono)\n"
-                            f"Czas: {t_time:.1f}s ({fmt(t_time - b_time)}) | Ryzyko: {t_risk:.1f} ({fmt(t_risk - b_risk)}) | "
-                            f"Zakręty: {t_turns} ({fmt_i(t_turns - b_turns)})",
-                            fontsize=14, color='orange', pad=25)
-                    else:
-                        lc_bg_ref.set_segments([])
-                        lc_ref.set_segments([])
-                        ax_ref.set_title(f"{name_ref} — BRAK TRASY (W={w:.0f})", fontsize=14, color='red', pad=25)
-
+                _draw_scenario(result, ax_ref, lc_f_bg_ref, lc_f_ref,
+                               react_line, dot_line, lc_bg_ref, lc_ref,
+                               gline_ref, name_ref, clr_ref, w, m)
                 ax_ref.figure.canvas.draw_idle()
+
             return update_cmp
 
         update_fn = make_update(ax_cmp, lc_n_bg, lc_n, lc_f_bg, lc_f,
-                                path_global, global_speeds, algo_func, algo_name, color,
+                                algo_func, algo_name, color,
                                 slider_cmp, mass_slider_cmp, sim_state,
-                                line_reaction_cmp, detect_dot_cmp)
+                                line_reaction_cmp, detect_dot_cmp, global_line_cmp)
         slider_cmp.on_changed(update_fn)
         mass_slider_cmp.on_changed(update_fn)
 

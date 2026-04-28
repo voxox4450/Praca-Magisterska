@@ -357,6 +357,7 @@ def base_search(
     collision_mask = grid_map.collision_mask
     risk_grid = grid_map.risk_grid
     goal_x, goal_y = goal
+    map_w, map_h = grid_map.width, grid_map.height
 
     while open_list:
         current = heapq.heappop(open_list)
@@ -402,6 +403,10 @@ def base_search(
         # [OPT] Prekomputowane dystanse, collision_mask zamiast is_collision()
         for dx, dy, dist_cost in _NEIGHBORS:
             nx, ny = cx + dx, cy + dy
+
+            # [FIX] Sprawdzenie granic mapy — zapobiega IndexError przy krawędziach
+            if not (0 <= nx < map_w and 0 <= ny < map_h):
+                continue
 
             # [OPT] Bezpośredni odczyt z numpy bool array — bez wywołania funkcji
             if collision_mask[nx, ny]:
