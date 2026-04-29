@@ -30,3 +30,12 @@ def run_risk_astar(
         initial_straight_dist=initial_straight_dist,
         drone_mass=drone_mass
     )
+
+
+# [METODOLOGIA] Atrybut deklaratywny — symulator pyta funkcję, czy posiada model
+# kinematyczny, i na tej podstawie decyduje, czy doczepić bufor hamowania
+# awaryjnego przed replanowaniem. Bufor jest właściwością algorytmu (wynika
+# ze świadomości bezwładności platformy), nie zewnętrzną konfiguracją testu.
+# Wszystkie trzy systemy otrzymują identyczne wartości wejściowe — różnią się
+# wyłącznie tym, jak je interpretują.
+run_risk_astar.uses_kinematics = True

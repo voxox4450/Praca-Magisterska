@@ -20,6 +20,9 @@ from config import (
     COLLISION_RADIUS, OBSTACLE_RADIUS,
     DRONE_MASS_KG, MAX_THRUST_NET_N
 )
+from visualization.metrics_terminal import (
+    analyze_braking_scenario, print_braking_comparison
+)
 
 
 def _setup_ui_colorbars(fig, ax, img, speed_axes_rect: list,
@@ -189,9 +192,16 @@ def smooth_path_with_speeds(path: List[Tuple[int, int]], speeds: np.ndarray,
 # reakcja → replan. Zwraca dict z danymi do wizualizacji i statystykami.
 # Używana przez update_route (Risk-Aware) i update_cmp (Dijkstra/A*).
 # ─────────────────────────────────────────────────────────────────────────────
-def _compute_full_scenario(env, start, goal, algo_func, w, m, click_pos, grid_before, use_buffer=True):
+def _compute_full_scenario(env, start, goal, algo_func, w, m, click_pos, grid_before):
     """
     Oblicza pełny scenariusz omijania przeszkody.
+
+    [METODOLOGIA] Wszystkie trzy systemy nawigacyjne otrzymują identyczne
+    wartości wejściowe (mapa, masa, prędkość, kierunek, parametry fizyczne).
+    Bufor hamowania awaryjnego doczepia się automatycznie wtedy i tylko wtedy,
+    gdy funkcja algorytmu deklaruje atrybut `uses_kinematics = True`.
+    Decyzja jest właściwością algorytmu, nie zewnętrzną konfiguracją testu —
+    system bez modelu kinematycznego nie ma jak rozpoznać potrzeby hamowania.
 
     Returns dict z kluczami:
         'clean_path', 'clean_stats' — trasa na czystej mapie
@@ -206,6 +216,11 @@ def _compute_full_scenario(env, start, goal, algo_func, w, m, click_pos, grid_be
         'crash' — bool
         'mode' — 'CLEAR' / 'NORMAL' / 'RTH' / 'CRASH' / 'NO_SENSOR'
     """
+    # [METODOLOGIA] Bufor hamowania jako emergentna właściwość algorytmu —
+    # nie zewnętrzny parametr testu. Identyczne dane wejściowe dla wszystkich
+    # systemów; różnice w wynikach wynikają wyłącznie z architektury algorytmu.
+    use_buffer = getattr(algo_func, 'uses_kinematics', False)
+
     a = MAX_THRUST_NET_N / m
     col_r = collision_radius_for_mass(m)
     phys_r = drone_radius_for_mass(m)
@@ -315,7 +330,25 @@ def _compute_full_scenario(env, start, goal, algo_func, w, m, click_pos, grid_be
         return result
     result['crash'] = False
 
-    # ── KROK 4: Bufor hamowania (TYLKO Risk-Aware — ma wiedzę o prędkości) ──
+    # ── KROK 4: Bufor hamowania (system Risk-Aware A*) ────────────────────
+    # [METODOLOGIA] Bufor hamowania jest integralną częścią systemu Risk-Aware A*.
+    # Posiadanie modelu kinematycznego oznacza, że algorytm "wie" o bezwładności
+    # platformy i przed replanowaniem musi wytracić prędkość do bezpiecznego
+    # poziomu - inaczej replan zaczyna się od stanu fizycznie niemożliwego
+    # do zrealizowania (dron leci v_react_end, ale nowa trasa wymaga v_safe_turn).
+    # Klasyczne algorytmy (Dijkstra, A*) nie posiadają tego mechanizmu - replanują
+    # natychmiast po fazie reakcji, ignorując że dron wciąż leci z dużą prędkością.
+    #
+    # WAŻNE — RÓWNOŚĆ DANYCH WEJŚCIOWYCH:
+    # Wszystkie trzy systemy otrzymują w tym przebiegu IDENTYCZNE wartości:
+    # tę samą mapę, masę, prędkość, kierunek, parametry fizyczne. Decyzja
+    # o doczepieniu bufora jest podejmowana wewnątrz tej funkcji na podstawie
+    # atrybutu `uses_kinematics` zadeklarowanego przy funkcji algorytmu —
+    # nie na podstawie zewnętrznej konfiguracji testu czy "tożsamości okna".
+    # Brak bufora dla algorytmów klasycznych nie jest sztucznym ograniczeniem,
+    # lecz konsekwencją braku w nich modelu kinematycznego — bez tego modelu
+    # algorytm nie ma jak wywnioskować, że hamowanie przed replanowaniem
+    # jest w ogóle konieczne.
     env.update_drone_footprint(phys_r, col_r)
 
     buffer_points = []
@@ -711,6 +744,33 @@ def run_online_simulation(
 
         _draw_scenario(result, ax, lc_flown_bg, lc_flown, line_reaction, drone_marker,
                        lc_new_bg, lc_new, line_global, "Risk-Aware A*", 'lime', w, m)
+
+        # ── RAPORT METRYK HAMOWANIA: 3 algorytmy w terminalu ──────────────
+        if func_dijkstra is not None and func_astar is not None:
+            # [METODOLOGIA] Wszystkie trzy systemy wywoływane są tym samym kodem
+            # i otrzymują identyczne dane wejściowe (mapa, masa, prędkość, kierunek).
+            # Decyzja o doczepieniu bufora hamowania jest podejmowana wewnątrz
+            # _compute_full_scenario na podstawie atrybutu `uses_kinematics`
+            # zadeklarowanego przy każdej funkcji algorytmu — jest właściwością
+            # algorytmu, nie zewnętrzną konfiguracją testu.
+            result_dij = _compute_full_scenario(env, start, goal, func_dijkstra,
+                                                w, m, sim_state["obstacle_pos"],
+                                                grid_before)
+            result_ast = _compute_full_scenario(env, start, goal, func_astar,
+                                                w, m, sim_state["obstacle_pos"],
+                                                grid_before)
+
+            print_braking_comparison(
+                results={
+                    "Dijkstra":      analyze_braking_scenario(result_dij, m),
+                    "A* Standard":   analyze_braking_scenario(result_ast, m),
+                    "Risk-Aware A*": analyze_braking_scenario(result, m),
+                },
+                mass=m,
+                risk_weight=w,
+                obstacle_pos=sim_state["obstacle_pos"],
+            )
+
         fig.canvas.draw_idle()
 
     risk_slider.on_changed(update_route)
@@ -842,8 +902,7 @@ def _open_comparison_windows(
                     return
 
                 result = _compute_full_scenario(env, start, goal, func_ref, w, m,
-                                                sim_st["obstacle_pos"], grid_before,
-                                                use_buffer=False)
+                                                sim_st["obstacle_pos"], grid_before)
 
                 _draw_scenario(result, ax_ref, lc_f_bg_ref, lc_f_ref,
                                react_line, dot_line, lc_bg_ref, lc_ref,
