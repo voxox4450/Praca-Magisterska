@@ -24,8 +24,3 @@ def run_astar(
         use_kinematics=False,
         drone_mass=drone_mass
     )
-
-
-# [METODOLOGIA] Patrz komentarz w a_star_risk.py — A* Standard nie posiada
-# modelu kinematycznego, więc nie wnioskuje o potrzebie hamowania awaryjnego.
-run_astar.uses_kinematics = False

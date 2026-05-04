@@ -261,7 +261,6 @@ def calculate_kinematic_flight_time(
 # [FIX #29] Dekompozycja kosztów ścieżki — diagnostyka post-hoc.
 # Oblicza DOKŁADNIE te same składniki, co base_search() na ścieżce wynikowej.
 # Pozwala zweryfikować: g_cost ≈ cost_dist + cost_risk + cost_turn
-# (nierówność wynika z braking_penalty w trybie kinematycznym)
 # ─────────────────────────────────────────────────────────────────────────────
 def decompose_path_costs(
         path: List[Tuple[int, int]],
@@ -302,7 +301,6 @@ def decompose_path_costs(
 # ─────────────────────────────────────────────────────────────────────────────
 # GŁÓWNA FUNKCJA PRZESZUKIWANIA
 # [FIX #2, #5]  Ujednolicona proporcjonalna formuła kary dla wszystkich algo
-# [FIX #16]     braking_penalty w jednostkach dystansu (nie czasu)
 # [FIX #32]     Identyczny format klucza stanu (x,y,dx,dy,bucket)
 # [OPT]         collision_mask, bezpośredni dostęp do grid, prekomp. dystanse
 # ─────────────────────────────────────────────────────────────────────────────
@@ -420,6 +418,19 @@ def base_search(
             v2 = (dx, dy)
             new_speed = cur_speed
 
+            # ── WSPÓLNE OGRANICZENIA GEOMETRYCZNE PLATFORMY BSP ───────────
+            # Dron jako fizyczna maszyna nie potrafi zawrócić w punkcie —
+            # wymaga to łuku o niezerowym promieniu. To cecha PLATFORMY,
+            # nie algorytmu. Egzekwowane jednolicie dla wszystkich trzech
+            # systemów planowania, niezależnie od posiadania modelu fizyki.
+            is_turn = (v1 != (0, 0) and v1 != v2)
+            base_turn_cost = 0.0
+            angle = 0.0
+            if is_turn:
+                base_turn_cost, angle = compute_turn_cost(v1, v2, turn_penalty)
+                if angle >= _RAD_170:
+                    continue
+
             # ── MODEL ZAAWANSOWANY (Risk-Aware A* / A*-KIN) ───────────────
             if use_kinematics:
                 node_speed = cur_speed
@@ -427,25 +438,21 @@ def base_search(
                 new_speed = min(V_MAX_MS, math.sqrt(node_speed * node_speed + 2.0 * accel * dist_cost))
                 new_straight_dist = straight_dist + dist_cost
 
-                if v1 != (0, 0) and v1 != v2:
-                    base_turn_cost, angle = compute_turn_cost(v1, v2, turn_penalty)
-
-                    if angle >= _RAD_170:
-                        continue
-
+                if is_turn:
                     v_safe_turn = compute_safe_turn_speed(angle)
 
-                    braking_penalty = 0.0
+                    # Twarde odrzucenie manewrów fizycznie niewykonalnych:
+                    # jeśli dron leci za szybko i nie zdąży wytracić prędkości
+                    # do bezpiecznego poziomu na dostępnym odcinku prostym,
+                    # zakręt nie istnieje jako legalna opcja.
                     if node_speed > v_safe_turn:
                         available_braking_dist = straight_dist + dist_cost
                         braking_dist_needed = (node_speed * node_speed - v_safe_turn * v_safe_turn) / (2.0 * accel)
                         if braking_dist_needed > available_braking_dist:
                             continue
 
-                        braking_penalty = braking_dist_needed
-
                     new_speed = v_safe_turn
-                    turn_cost = base_turn_cost + braking_penalty
+                    turn_cost = base_turn_cost
                     new_straight_dist = 0.0
 
                 new_bucket = _braking_bucket(new_straight_dist)
@@ -453,8 +460,7 @@ def base_search(
             # ── MODEL KLASYCZNY (Dijkstra / A* Standard) ──────────────────
             else:
                 new_straight_dist = straight_dist + dist_cost
-                if v1 != (0, 0) and v1 != v2:
-                    base_turn_cost, angle = compute_turn_cost(v1, v2, turn_penalty)
+                if is_turn:
                     turn_cost = base_turn_cost
                     new_straight_dist = 0.0
 

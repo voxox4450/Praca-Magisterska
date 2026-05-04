@@ -15,7 +15,7 @@ from algorithms.common import (
     sensor_range_for_mass, processing_delay_for_mass
 )
 from config import (
-    V_MAX_MS, ACCELERATION, MAX_LATERAL_ACCEL, MIN_TURN_SPEED,
+    V_MAX_MS, ACCELERATION,
     RISK_WEIGHT, TURN_PENALTY,
     COLLISION_RADIUS, OBSTACLE_RADIUS,
     DRONE_MASS_KG, MAX_THRUST_NET_N
@@ -197,30 +197,30 @@ def _compute_full_scenario(env, start, goal, algo_func, w, m, click_pos, grid_be
     Oblicza pełny scenariusz omijania przeszkody.
 
     [METODOLOGIA] Wszystkie trzy systemy nawigacyjne otrzymują identyczne
-    wartości wejściowe (mapa, masa, prędkość, kierunek, parametry fizyczne).
-    Bufor hamowania awaryjnego doczepia się automatycznie wtedy i tylko wtedy,
-    gdy funkcja algorytmu deklaruje atrybut `uses_kinematics = True`.
-    Decyzja jest właściwością algorytmu, nie zewnętrzną konfiguracją testu —
-    system bez modelu kinematycznego nie ma jak rozpoznać potrzeby hamowania.
+    wartości wejściowe (mapa, masa, prędkość, kierunek, parametry fizyczne)
+    i są wywoływane przez identyczny kod symulacyjny. Różnice w wynikach
+    wynikają WYŁĄCZNIE z wewnętrznej logiki algorytmu:
+      - Risk-Aware A*: planuje bufor hamowania awaryjnego wewnątrz siebie
+        (zob. _plan_braking_buffer w a_star_risk.py), bo posiada model
+        kinematyczny pozwalający obliczyć wymaganą drogę hamowania.
+      - Dijkstra / A*: nie planują bufora, bo pojęcie "bufora hamowania"
+        jest bez modelu kinematycznego nieokreślone.
+    Symulator (ta funkcja) nie zna tych różnic i nie podejmuje za algorytm
+    żadnych decyzji kinematycznych.
 
     Returns dict z kluczami:
         'clean_path', 'clean_stats' — trasa na czystej mapie
         'blocked' — bool, czy przeszkoda blokuje trasę
         'detect_idx', 'react_idx', 'v_detect', 'v_react_end' — reakcja
         'reaction_path', 'drone_pos', 'heading'
-        'replan_path', 'replan_stats' — trasa omijania
-        'buffer_points', 'buffer_dist', 'v_buffer_end'
-        'full_new_path' — bufor + replan (do rysowania)
+        'replan_path', 'replan_stats' — trasa omijania (z buforem dla Risk-Aware)
+        'buffer_points', 'buffer_dist', 'v_buffer_end' — informacje wyjęte ze stats algorytmu
+        'full_new_path' — pełna trasa po replanowaniu (do rysowania)
         'baseline' — (dist, time, risk, turns) trasy czystej
         'total' — (dist, time, risk, turns) trasy z omijaniem
         'crash' — bool
         'mode' — 'CLEAR' / 'NORMAL' / 'RTH' / 'CRASH' / 'NO_SENSOR'
     """
-    # [METODOLOGIA] Bufor hamowania jako emergentna właściwość algorytmu —
-    # nie zewnętrzny parametr testu. Identyczne dane wejściowe dla wszystkich
-    # systemów; różnice w wynikach wynikają wyłącznie z architektury algorytmu.
-    use_buffer = getattr(algo_func, 'uses_kinematics', False)
-
     a = MAX_THRUST_NET_N / m
     col_r = collision_radius_for_mass(m)
     phys_r = drone_radius_for_mass(m)
@@ -330,69 +330,32 @@ def _compute_full_scenario(env, start, goal, algo_func, w, m, click_pos, grid_be
         return result
     result['crash'] = False
 
-    # ── KROK 4: Bufor hamowania (system Risk-Aware A*) ────────────────────
-    # [METODOLOGIA] Bufor hamowania jest integralną częścią systemu Risk-Aware A*.
-    # Posiadanie modelu kinematycznego oznacza, że algorytm "wie" o bezwładności
-    # platformy i przed replanowaniem musi wytracić prędkość do bezpiecznego
-    # poziomu - inaczej replan zaczyna się od stanu fizycznie niemożliwego
-    # do zrealizowania (dron leci v_react_end, ale nowa trasa wymaga v_safe_turn).
-    # Klasyczne algorytmy (Dijkstra, A*) nie posiadają tego mechanizmu - replanują
-    # natychmiast po fazie reakcji, ignorując że dron wciąż leci z dużą prędkością.
-    #
-    # WAŻNE — RÓWNOŚĆ DANYCH WEJŚCIOWYCH:
-    # Wszystkie trzy systemy otrzymują w tym przebiegu IDENTYCZNE wartości:
-    # tę samą mapę, masę, prędkość, kierunek, parametry fizyczne. Decyzja
-    # o doczepieniu bufora jest podejmowana wewnątrz tej funkcji na podstawie
-    # atrybutu `uses_kinematics` zadeklarowanego przy funkcji algorytmu —
-    # nie na podstawie zewnętrznej konfiguracji testu czy "tożsamości okna".
-    # Brak bufora dla algorytmów klasycznych nie jest sztucznym ograniczeniem,
-    # lecz konsekwencją braku w nich modelu kinematycznego — bez tego modelu
-    # algorytm nie ma jak wywnioskować, że hamowanie przed replanowaniem
-    # jest w ogóle konieczne.
+    # ── KROK 4: Replanowanie (algorytm sam decyduje o buforze) ───────────
+    # [METODOLOGIA] Wywołanie jest IDENTYCZNE dla wszystkich trzech systemów —
+    # ten sam start (drone_pos), ten sam cel, ta sama prędkość początkowa
+    # (v_react_end po fazie bezwładności systemu). Różnice w wyniku wynikają
+    # wyłącznie z wewnętrznej logiki algorytmu:
+    #   - Risk-Aware A*: na podstawie modelu kinematycznego sam wewnątrz siebie
+    #     planuje bufor hamowania awaryjnego (zob. _plan_braking_buffer
+    #     w a_star_risk.py), po czym przeszukuje graf od końca bufora do celu.
+    #   - Dijkstra / A*: brak kroku planowania bufora — przeszukują graf
+    #     bezpośrednio od pozycji drona, ignorując fakt, że pierwszy zakręt
+    #     nowej trasy będzie wymagał niższej prędkości.
+    # Decyzja o doczepieniu bufora należy do algorytmu, nie do symulatora.
     env.update_drone_footprint(phys_r, col_r)
 
-    buffer_points = []
-    buffer_dist = 0.0
-    if use_buffer and heading != (0, 0) and v_react_end > 0:
-        r_45 = 1.5 / max(0.1, math.sin(math.radians(22.5)))
-        v_safe_ref = max(MIN_TURN_SPEED, math.sqrt(MAX_LATERAL_ACCEL * r_45))
-        v_safe_ref = min(v_safe_ref, V_MAX_MS)
-        braking_need = max(0.0, (v_react_end ** 2 - v_safe_ref ** 2) / (2 * a)) \
-            if v_react_end > v_safe_ref else 0.0
-        step_len = math.sqrt(heading[0] ** 2 + heading[1] ** 2)
-        buf_steps = max(1, int(math.ceil(braking_need / step_len)))
-        for d in range(1, buf_steps + 1):
-            bp = (drone_pos[0] + heading[0] * d, drone_pos[1] + heading[1] * d)
-            bx, by = int(bp[0]), int(bp[1])
-            if 0 <= bx < env.width and 0 <= by < env.height:
-                if not env.collision_mask[bx, by]:
-                    buffer_points.append(bp)
-                    buffer_dist += step_len
-                else:
-                    break
-            else:
-                break
-
-    v_buf_end = max(0.0, math.sqrt(max(0.0, v_react_end ** 2 - 2 * a * buffer_dist)))
-    search_start = buffer_points[-1] if buffer_points else drone_pos
-
-    result['buffer_points'] = buffer_points
-    result['buffer_dist'] = buffer_dist
-    result['v_buffer_end'] = v_buf_end
-
-    # ── KROK 5: Replan na brudnej mapie ──────────────────────────────────
-    replan_path, replan_stats = algo_func(env, search_start, goal, risk_weight=w,
+    replan_path, replan_stats = algo_func(env, drone_pos, goal, risk_weight=w,
                                           turn_penalty=TURN_PENALTY, drone_radius=col_r,
                                           initial_direction=heading,
-                                          current_speed=v_buf_end,
+                                          current_speed=v_react_end,
                                           drone_mass=m)
 
     if not replan_path or not replan_stats.get('found'):
         # RTH: powrót do startu
-        replan_path, replan_stats = algo_func(env, search_start, start, risk_weight=40.0,
+        replan_path, replan_stats = algo_func(env, drone_pos, start, risk_weight=40.0,
                                               turn_penalty=TURN_PENALTY, drone_radius=col_r,
                                               initial_direction=heading,
-                                              current_speed=v_buf_end,
+                                              current_speed=v_react_end,
                                               drone_mass=m)
         if replan_path and replan_stats.get('found'):
             result['mode'] = 'RTH'
@@ -402,11 +365,19 @@ def _compute_full_scenario(env, start, goal, algo_func, w, m, click_pos, grid_be
     else:
         result['mode'] = 'NORMAL'
 
-    # Zbuduj pełną trasę od reakcji
-    if buffer_points:
-        full_new = [drone_pos] + buffer_points + replan_path[1:]
-    else:
-        full_new = replan_path
+    # Wyciągnij informacje o buforze ze stats algorytmu (Risk-Aware A*
+    # zwraca buffer_points jako część swojego wyniku; klasyczne — pustą listę).
+    buffer_points = replan_stats.get('buffer_points', [])
+    buffer_dist = replan_stats.get('buffer_dist', 0.0)
+    v_buf_end = replan_stats.get('v_after_buffer', v_react_end)
+
+    result['buffer_points'] = buffer_points
+    result['buffer_dist'] = buffer_dist
+    result['v_buffer_end'] = v_buf_end
+
+    # Pełna trasa od pozycji drona — algorytm zwraca ją już z buforem
+    # doczepionym na początku (jeśli posiada model kinematyczny).
+    full_new = replan_path
 
     result['replan_path'] = replan_path
     result['replan_stats'] = replan_stats
@@ -749,10 +720,12 @@ def run_online_simulation(
         if func_dijkstra is not None and func_astar is not None:
             # [METODOLOGIA] Wszystkie trzy systemy wywoływane są tym samym kodem
             # i otrzymują identyczne dane wejściowe (mapa, masa, prędkość, kierunek).
-            # Decyzja o doczepieniu bufora hamowania jest podejmowana wewnątrz
-            # _compute_full_scenario na podstawie atrybutu `uses_kinematics`
-            # zadeklarowanego przy każdej funkcji algorytmu — jest właściwością
-            # algorytmu, nie zewnętrzną konfiguracją testu.
+            # Symulator nie steruje obecnością ani brakiem bufora hamowania —
+            # to wynika wyłącznie z zawartości pliku algorytmu: Risk-Aware A*
+            # zawiera funkcję _plan_braking_buffer w a_star_risk.py i wywołuje
+            # ją wewnątrz siebie, klasyczne algorytmy nie zawierają tej funkcji.
+            # Różnica między systemami sprowadza się do JEDNEJ zmiennej:
+            # obecności modelu fizyki lotu w kodzie algorytmu.
             result_dij = _compute_full_scenario(env, start, goal, func_dijkstra,
                                                 w, m, sim_state["obstacle_pos"],
                                                 grid_before)
