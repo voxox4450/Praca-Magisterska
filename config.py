@@ -69,15 +69,17 @@ RISK_WEIGHT: float    = 20.0         # Domyślna waga kosztu ryzyka (W)
 # modelu drona → ta sama formuła kary za zakręt:
 #   turn_cost = TURN_PENALTY × (angle / (π/2))
 # Różnica między algorytmami leży WYŁĄCZNIE w:
-#   - heurystyce (Dijkstra: brak, A*/Risk: euklidesowa)
-#   - kinematyce (tylko Risk-Aware: profil prędkości + hamowanie)
+#   - heurystyce (Dijkstra: brak, A*/Risk: euklidesowa — TA SAMA dla obu)
+#   - kinematyce (tylko Risk-Aware: profil prędkości + bufor hamowania)
 TURN_PENALTY: float = 20.0
 
-# Mnożnik > 1.0 → Weighted A* (ε = multiplier − 1.0).
-# Gwarancja: koszt rozwiązania ≤ (1+ε) × optimum.
-# Ustawienie 1.0 → czysta dopuszczalność (gwarancja optymalności, wolniejsze).
-HEURISTIC_MULT_ASTAR: float = 1.0  # ε = 0.001 (~0.1% ponad optimum)
-HEURISTIC_MULT_RISK:  float = 1.0  # ε = 0.001
+# Mnożnik heurystyki — TEN SAM dla A* Standard i Risk-Aware A*.
+# Wartość 1.0 → czysta dopuszczalność (gwarancja optymalności).
+# Mnożnik > 1.0 → Weighted A* (ε = multiplier − 1.0), szybsze ale nieoptymalne.
+# Stosowanie tej samej wartości dla obu algorytmów heurystycznych zapewnia,
+# że jedyną różnicą między nimi jest obecność modelu fizyki, a nie
+# agresywność przeszukiwania.
+HEURISTIC_MULTIPLIER: float = 1.0
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SYMULACJA ONLINE

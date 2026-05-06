@@ -82,21 +82,28 @@ def run_risk_astar(
         drone_mass: float = DRONE_MASS_KG
 ) -> Tuple[List[Tuple[int, int]], Dict[str, Any]]:
     """
-    Risk-Aware A* z pełnym modelem kinematycznym drona.
-    Ta sama formuła kary za zakręt co Dijkstra/A* (proporcjonalna do kąta).
-    DODATKOWO względem A* Standard:
-    - planowanie bufora hamowania awaryjnego, gdy dron startuje z niezerową
-      prędkością (current_speed > v_safe) — algorytm rezerwuje odcinek
-      prostoliniowy na wytracenie prędkości, ZANIM zacznie przeszukiwać graf,
-    - ograniczenie prędkości w zakrętach (fizyka dośrodkowa),
-    - kara za dystans hamowania w funkcji kosztu,
-    - odrzucenie zakrętów fizycznie niemożliwych do wyhamowania.
-    Parametr drone_mass wpływa na przyspieszenie (a = F/m).
+    Risk-Aware A* — algorytm planowania trasy z modelem fizyki lotu BSP.
 
-    Bufor hamowania jest WEWNĘTRZNĄ częścią tego algorytmu — nie jest
-    obliczany w warstwie symulacji ani doczepiany z zewnątrz. Decyzja
-    o jego długości i pozycji wynika wprost z modelu kinematycznego, do
-    którego klasyczne algorytmy (Dijkstra, A*) nie mają dostępu.
+    Różni się od klasycznych algorytmów (Dijkstra, A*) JEDNĄ zmienną:
+    obecnością modelu kinematycznego (znajomość prędkości, przyspieszenia,
+    masy, fizyki ruchu dośrodkowego). Wszystkie obserwowane różnice
+    w zachowaniu są LOGICZNYMI KONSEKWENCJAMI tej jednej zmiennej:
+
+    1. Profil prędkości jako część stanu grafu (znajomość v wymagana).
+    2. Bezpieczna prędkość w zakręcie z fizyki dośrodkowej v = √(a_lat·r)
+       (znajomość a_lat, geometrii zakrętu wymagana).
+    3. Twarde odrzucenie zakrętów fizycznie niewykonalnych — gdy wymagana
+       droga hamowania (v² - v_safe²)/(2a) przekracza dostępny odcinek prosty
+       (znajomość v, a, v_safe wymagana).
+    4. Bufor hamowania awaryjnego planowany przed przeszukiwaniem grafu,
+       gdy dron startuje z prędkością przekraczającą bezpieczną dla pierwszego
+       zakrętu (zob. _plan_braking_buffer poniżej).
+
+    Algorytm bez modelu fizyki nie może wykonywać żadnego z tych kroków —
+    nie z powodu zewnętrznego wyłączenia, lecz dlatego, że pojęcia te są
+    bez modelu fizyki nieokreślone.
+
+    Parametr drone_mass wpływa na przyspieszenie a = F/m.
     """
     # ── Faza 1: Planowanie bufora hamowania (logika kinematyczna) ──────
     buffer_points, buffer_dist, v_after_buffer = _plan_braking_buffer(

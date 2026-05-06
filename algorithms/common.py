@@ -6,7 +6,7 @@ from environment.grid_map import GridMap
 from config import (
     V_MAX_MS, ACCELERATION, MAX_LATERAL_ACCEL, MIN_TURN_SPEED,
     DRONE_MASS_KG, MAX_THRUST_NET_N,
-    HEURISTIC_MULT_ASTAR, HEURISTIC_MULT_RISK,
+    HEURISTIC_MULTIPLIER,
     RISK_WEIGHT, TURN_PENALTY, COLLISION_RADIUS,
     TURN_RADIUS_CONST, SAFE_MARGIN_M
 )
@@ -476,8 +476,10 @@ def base_search(
 
                 h = 0.0
                 if use_heuristic:
-                    multiplier = HEURISTIC_MULT_RISK if use_kinematics else HEURISTIC_MULT_ASTAR
-                    h = math.sqrt((nx - goal_x) ** 2 + (ny - goal_y) ** 2) * multiplier
+                    # Identyczna heurystyka dla A* Standard i Risk-Aware A* —
+                    # różnica między nimi to model fizyki, nie agresywność
+                    # przeszukiwania.
+                    h = math.sqrt((nx - goal_x) ** 2 + (ny - goal_y) ** 2) * HEURISTIC_MULTIPLIER
 
                 neighbor = Node(nx, ny, new_g, current, direction=v2, heuristic=h,
                                 speed=new_speed)
