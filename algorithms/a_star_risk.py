@@ -26,6 +26,25 @@ def _plan_braking_buffer(
     znajomości aktualnej prędkości, dostępnego przyspieszenia (a = F/m)
     oraz docelowej prędkości w zakręcie wynikającej z fizyki dośrodkowej.
 
+    [METODOLOGIA — BUFOR POD NAJGORSZY ZAKRĘT NA SIATCE]
+    Bufor projektowany jest pod NAJGORSZY możliwy zakręt na siatce
+    8-kierunkowej (135°, najniższa v_safe ≈ 3.37 m/s). Uzasadnienie:
+
+      1. Bezpieczeństwo: dron po zakończeniu bufora jest gotowy na DOWOLNY
+         zakręt na siatce, nie tylko na łagodne 45° czy 90°. Eliminuje to
+         konieczność dodatkowego hamowania na prostej grafowej przed
+         ostrzejszymi zakrętami.
+
+      2. Spójność z kryterium oceny: tabela porównawcza (metrics_terminal.py)
+         ocenia wszystkie algorytmy pod jednolity próg najgorszego zakrętu
+         (135°). Bufor planujący pod ten sam próg zapewnia, że Risk-Aware A*
+         realnie spełnia kryterium, pod które jest oceniany.
+
+      3. Konserwatywne ubezpieczenie: algorytm w momencie planowania bufora
+         nie zna jeszcze geometrii nadchodzącej trasy (bufor planowany jest
+         PRZED uruchomieniem base_search). Planowanie pod najgorszy przypadek
+         jest jedynym fizycznie poprawnym wyborem przy braku tej wiedzy.
+
     Zwraca:
         buffer_points — lista punktów składających się na bufor
         buffer_dist   — całkowita długość bufora [m]
@@ -36,10 +55,14 @@ def _plan_braking_buffer(
 
     accel = MAX_THRUST_NET_N / drone_mass
 
-    # Bezpieczna prędkość wejścia w zakręt 45° na siatce 8-kierunkowej
-    # (najczęstszy scenariusz pierwszego zakrętu po replanowaniu)
-    r_45 = TURN_RADIUS_CONST / max(0.1, math.sin(math.radians(22.5)))
-    v_safe_ref = max(MIN_TURN_SPEED, math.sqrt(MAX_LATERAL_ACCEL * r_45))
+    # Bezpieczna prędkość wejścia w NAJGORSZY zakręt na siatce 8-kierunkowej.
+    # Na siatce 8-kierunkowej możliwe kąty zakrętu to {45°, 90°, 135°} —
+    # 135° jest najostrzejszy, więc wymaga najniższej v_safe (≈ 3.37 m/s).
+    # Formuła r = TURN_RADIUS_CONST / sin(angle/2) dla angle = 135°:
+    #   r_135 = 1.5 / sin(67.5°) ≈ 1.62 m
+    #   v_safe = √(MAX_LATERAL_ACCEL · r_135) = √(7 · 1.62) ≈ 3.37 m/s
+    r_135 = TURN_RADIUS_CONST / max(0.1, math.sin(math.radians(67.5)))
+    v_safe_ref = max(MIN_TURN_SPEED, math.sqrt(MAX_LATERAL_ACCEL * r_135))
     v_safe_ref = min(v_safe_ref, V_MAX_MS)
 
     if current_speed <= v_safe_ref:
@@ -96,8 +119,8 @@ def run_risk_astar(
        droga hamowania (v² - v_safe²)/(2a) przekracza dostępny odcinek prosty
        (znajomość v, a, v_safe wymagana).
     4. Bufor hamowania awaryjnego planowany przed przeszukiwaniem grafu,
-       gdy dron startuje z prędkością przekraczającą bezpieczną dla pierwszego
-       zakrętu (zob. _plan_braking_buffer poniżej).
+       gdy dron startuje z prędkością przekraczającą bezpieczną dla najgorszego
+       zakrętu na siatce 8-kierunkowej (zob. _plan_braking_buffer poniżej).
 
     Algorytm bez modelu fizyki nie może wykonywać żadnego z tych kroków —
     nie z powodu zewnętrznego wyłączenia, lecz dlatego, że pojęcia te są

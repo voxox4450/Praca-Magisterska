@@ -207,19 +207,6 @@ def _compute_full_scenario(env, start, goal, algo_func, w, m, click_pos, grid_be
         jest bez modelu kinematycznego nieokreślone.
     Symulator (ta funkcja) nie zna tych różnic i nie podejmuje za algorytm
     żadnych decyzji kinematycznych.
-
-    Returns dict z kluczami:
-        'clean_path', 'clean_stats' — trasa na czystej mapie
-        'blocked' — bool, czy przeszkoda blokuje trasę
-        'detect_idx', 'react_idx', 'v_detect', 'v_react_end' — reakcja
-        'reaction_path', 'drone_pos', 'heading'
-        'replan_path', 'replan_stats' — trasa omijania (z buforem dla Risk-Aware)
-        'buffer_points', 'buffer_dist', 'v_buffer_end' — informacje wyjęte ze stats algorytmu
-        'full_new_path' — pełna trasa po replanowaniu (do rysowania)
-        'baseline' — (dist, time, risk, turns) trasy czystej
-        'total' — (dist, time, risk, turns) trasy z omijaniem
-        'crash' — bool
-        'mode' — 'CLEAR' / 'NORMAL' / 'RTH' / 'CRASH' / 'NO_SENSOR'
     """
     a = MAX_THRUST_NET_N / m
     col_r = collision_radius_for_mass(m)
@@ -296,10 +283,24 @@ def _compute_full_scenario(env, start, goal, algo_func, w, m, click_pos, grid_be
     t_stop = v_detect / a
     t_react = min(proc_delay, t_stop)
     react_dist = (v_detect * t_react) - (0.5 * a * (t_react ** 2))
-    react_indices = int(math.ceil(react_dist))
+
+    # [POPRAWKA 1] Przywrócone wyliczenie prędkości na końcu fazy reakcji
     v_react_end = max(0.0, v_detect - a * proc_delay)
 
-    react_idx = min(detect_idx + react_indices, len(clean_path) - 1)
+    # Iteruj po rzeczywistym dystansie ścieżki
+    accumulated_dist = 0.0
+    react_idx = detect_idx
+    for i in range(detect_idx, len(clean_path) - 1):
+        dx = clean_path[i + 1][0] - clean_path[i][0]
+        dy = clean_path[i + 1][1] - clean_path[i][1]
+        step_len = math.hypot(dx, dy)
+        accumulated_dist += step_len
+        react_idx = i + 1
+        if accumulated_dist >= react_dist:
+            break
+
+    # [POPRAWKA 2] Usunięta błędna linijka wykorzystująca `react_indices`
+
     reaction_path = clean_path[detect_idx:react_idx + 1]
     drone_pos = clean_path[react_idx]
 
@@ -331,17 +332,6 @@ def _compute_full_scenario(env, start, goal, algo_func, w, m, click_pos, grid_be
     result['crash'] = False
 
     # ── KROK 4: Replanowanie (algorytm sam decyduje o buforze) ───────────
-    # [METODOLOGIA] Wywołanie jest IDENTYCZNE dla wszystkich trzech systemów —
-    # ten sam start (drone_pos), ten sam cel, ta sama prędkość początkowa
-    # (v_react_end po fazie bezwładności systemu). Różnice w wyniku wynikają
-    # wyłącznie z wewnętrznej logiki algorytmu:
-    #   - Risk-Aware A*: na podstawie modelu kinematycznego sam wewnątrz siebie
-    #     planuje bufor hamowania awaryjnego (zob. _plan_braking_buffer
-    #     w a_star_risk.py), po czym przeszukuje graf od końca bufora do celu.
-    #   - Dijkstra / A*: brak kroku planowania bufora — przeszukują graf
-    #     bezpośrednio od pozycji drona, ignorując fakt, że pierwszy zakręt
-    #     nowej trasy będzie wymagał niższej prędkości.
-    # Decyzja o doczepieniu bufora należy do algorytmu, nie do symulatora.
     env.update_drone_footprint(phys_r, col_r)
 
     replan_path, replan_stats = algo_func(env, drone_pos, goal, risk_weight=w,
@@ -365,8 +355,7 @@ def _compute_full_scenario(env, start, goal, algo_func, w, m, click_pos, grid_be
     else:
         result['mode'] = 'NORMAL'
 
-    # Wyciągnij informacje o buforze ze stats algorytmu (Risk-Aware A*
-    # zwraca buffer_points jako część swojego wyniku; klasyczne — pustą listę).
+    # Wyciągnij informacje o buforze ze stats algorytmu
     buffer_points = replan_stats.get('buffer_points', [])
     buffer_dist = replan_stats.get('buffer_dist', 0.0)
     v_buf_end = replan_stats.get('v_after_buffer', v_react_end)
@@ -375,8 +364,7 @@ def _compute_full_scenario(env, start, goal, algo_func, w, m, click_pos, grid_be
     result['buffer_dist'] = buffer_dist
     result['v_buffer_end'] = v_buf_end
 
-    # Pełna trasa od pozycji drona — algorytm zwraca ją już z buforem
-    # doczepionym na początku (jeśli posiada model kinematyczny).
+    # Pełna trasa od pozycji drona
     full_new = replan_path
 
     result['replan_path'] = replan_path

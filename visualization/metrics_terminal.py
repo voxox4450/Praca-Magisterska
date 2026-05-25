@@ -4,52 +4,88 @@ metrics_terminal.py — Porównawczy raport hamowania w trybie dynamicznym.
 Wywoływany RAZ po kliknięciu przeszkody (oraz po każdej zmianie suwaków
 w trybie po kliknięciu). Drukuje w terminalu krótkie zestawienie 3 algorytmów
 z jedną kluczową miarą: czy dron zdąży wyhamować od wykrycia zagrożenia
-do bezpiecznej prędkości w pierwszym zakręcie nowej trasy.
+do bezpiecznej prędkości pozwalającej na DOWOLNY zakręt na siatce.
 
-[METODOLOGIA - PORÓWNANIE SYSTEMÓW NAWIGACYJNYCH]
+[METODOLOGIA — PORÓWNANIE SYSTEMÓW NAWIGACYJNYCH]
 Praca porównuje KOMPLETNE SYSTEMY NAWIGACYJNE, nie izolowane algorytmy grafowe.
 Tytuł pracy ("Optymalizacja tras BSP z uwzględnieniem stref ryzyka") wymaga
 oceny pełnego systemu planowania w dynamicznym środowisku miejskim.
 
 System Risk-Aware A* obejmuje:
-  - algorytm grafowy z modelem kinematycznym w funkcji kosztu
+  - algorytm grafowy z modelem kinematycznym w funkcji kosztu,
   - mechanizm bufora hamowania awaryjnego przed replanowaniem
-    (wynika ze świadomości fizyki - algorytm "wie", że dron musi wytracić
-    prędkość zanim zacznie nowy manewr)
+    (wynika ze świadomości fizyki — algorytm "wie", że dron musi wytracić
+    prędkość zanim zacznie nowy manewr).
 
 Systemy klasyczne (Dijkstra, A* Standard) obejmują:
-  - algorytm grafowy bez modelu kinematycznego
+  - algorytm grafowy bez modelu kinematycznego,
   - replanowanie natychmiast po fazie reakcji, bez bufora hamowania
     (algorytm nie posiada wiedzy o fizyce, więc nie wie, że hamowanie
-    jest konieczne - to nie jest "krzywda" dla klasyków, lecz konsekwencja
-    braku modelu kinematycznego)
+    jest konieczne — to nie jest "krzywda" dla klasyków, lecz konsekwencja
+    braku modelu kinematycznego).
 
-Wnioski z porównania dotyczą zatem nie tylko jakości samego planowania
-trasy, ale całościowego zachowania drona w środowisku z dynamicznymi
-zagrożeniami - zgodnie z praktycznym zastosowaniem BSP w przestrzeni
-zurbanizowanej.
+[METODOLOGIA — JEDNOLITY PRÓG OCENY]
+Wszystkie trzy systemy oceniane są pod identyczne kryterium fizyczne:
+zdolność do wyhamowania od prędkości v_detect do bezpiecznej prędkości
+NAJGORSZEGO możliwego zakrętu na siatce 8-kierunkowej (135°).
 
-Logika dla każdego algorytmu:
-  1. Wywołujemy _compute_full_scenario → otrzymujemy pełny scenariusz
-     (clean_path, detekcja, reakcja, bufor, replan_path).
-  2. Liczymy:
-       - droga reakcji  = długość odcinka clean_path[detect_idx..react_idx]
-                          (dron leci dalej, nie hamuje — bezwładność systemu).
-       - droga bufora   = długość zaplanowanego bufora hamowania
-                          (>0 tylko dla Risk-Aware - klasyki tego nie planują).
-       - odcinek prostej do 1. zakrętu = długość prostoliniowego początku
-                          replan_path (tu dron może hamować bez zmiany kierunku).
-       - droga dostępna na hamowanie = bufor + odcinek prostoliniowy
-       - droga wymagana = (v_detect² - v_safe²) / (2a), gdzie v_safe to
-                          bezpieczna prędkość pierwszego zakrętu nowej trasy.
-  3. Status: WYKONALNY jeśli dostępna ≥ wymagana, NIEWYKONALNY w przeciwnym razie.
+Wybór jednolitego progu (zamiast progu dostosowanego do faktycznego
+pierwszego zakrętu każdej trasy) gwarantuje pełną porównywalność:
+  - kryterium identyczne dla wszystkich algorytmów,
+  - reprezentuje sytuację najtrudniejszą fizycznie (najniższa v_safe),
+  - dron zdolny do tego progu jest gotowy na DOWOLNY zakręt na siatce.
+
+Dzięki temu różnice w wynikach (WYKONALNY vs NIEWYKONALNY) wynikają
+WYŁĄCZNIE z różnic w wewnętrznej logice algorytmów (obecność/brak bufora
+hamowania awaryjnego), a nie z przypadkowego wyboru łagodniejszych
+zakrętów przez dany algorytm. Jeśli Risk-Aware A* spełnia surowy próg
+135° mimo wybierania ostrzejszych zakrętów na trasie, to znaczy że robi
+to ŚWIADOMIE (planuje pod to bufor), a nie szczęśliwym zbiegiem geometrii.
+
+[METODOLOGIA — POJEDYNCZA CIĄGŁA DROGA HAMOWANIA]
+Od momentu wykrycia zagrożenia (v_detect) dron hamuje aż do osiągnięcia
+bezpiecznej prędkości v_safe(135°). Pełna dostępna droga hamowania
+składa się z trzech kolejnych rozłącznych odcinków:
+
+  v_detect
+      ↓ faza bezwładności systemu      → długość d_reaction
+  v_react_end
+      ↓ bufor hamowania awaryjnego     → długość d_buffer    (tylko Risk-Aware A*)
+  v_buffer_end
+      ↓ prostoliniowy odcinek replan_path → długość d_straight_post_buffer
+  v_safe(135°)
+
+Wszystkie trzy fazy to ciągłe hamowanie z tym samym przyspieszeniem a = F/m.
+Sumowanie ich do jednej DOSTĘPNEJ drogi jest fizycznie poprawne:
+
+    DOSTĘPNA = d_reaction + d_buffer + d_straight_post_buffer
+    WYMAGANA = (v_detect² − v_safe(135°)²) / (2a)
+    deficyt  = max(0, WYMAGANA − DOSTĘPNA)
+    status   = WYKONALNY gdy deficyt ≈ 0, NIEWYKONALNY w przeciwnym razie.
+
+Dla algorytmów klasycznych d_buffer = 0, więc DOSTĘPNA = d_reaction + prosta.
+Dla Risk-Aware A* d_buffer > 0, więc DOSTĘPNA jest powiększona o tę fazę —
+co odpowiada faktycznej zdolności systemu do hamowania awaryjnego.
+
+[UWAGA TECHNICZNA — KOLUMNA `prosta`]
+Risk-Aware A* dokleja bufor hamowania na początku swojego replan_path,
+więc surowy odcinek prostoliniowy "od indeksu 0 replan_path do pierwszego
+zakrętu" zawiera w sobie bufor. W kolumnie `prosta` raportujemy WYŁĄCZNIE
+część PO buforze (d_straight_post_buffer = d_to_turn − d_buffer), żeby
+trzy kolumny `reak`, `bufor`, `prosta` były rozłączne i poprawnie się
+sumowały do kolumny DOSTĘPNA.
 """
 
 import math
-from typing import List, Tuple, Dict, Any, Callable, Optional
+from typing import List, Tuple, Dict, Any
 
 from algorithms.common import compute_safe_turn_speed
-from config import MAX_THRUST_NET_N, V_MAX_MS
+from config import MAX_THRUST_NET_N
+
+
+# Najgorszy zakręt na siatce 8-kierunkowej: 135° (3π/4 rad).
+# Liczone raz na poziomie modułu — referencyjny próg WYMAGANEJ drogi hamowania.
+WORST_TURN_ANGLE_RAD = math.radians(135)
 
 
 def _path_length(path: List[Tuple[int, int]]) -> float:
@@ -79,7 +115,6 @@ def _first_turn_on_path(path: List[Tuple[int, int]]) -> Tuple[float, int]:
         dy = path[i][1] - path[i - 1][1]
         curr_dir = (dx, dy)
         if last_dir is not None and curr_dir != last_dir:
-            # zakręt w węźle i-1 (tam zmienia się kierunek)
             dot = last_dir[0] * curr_dir[0] + last_dir[1] * curr_dir[1]
             m1 = math.hypot(*last_dir)
             m2 = math.hypot(*curr_dir)
@@ -91,66 +126,35 @@ def _first_turn_on_path(path: List[Tuple[int, int]]) -> Tuple[float, int]:
     return 0.0, -1
 
 
-def _straight_distance_to_first_turn(path: List[Tuple[int, int]]) -> float:
-    """Długość prostoliniowego początku ścieżki — od path[0] do pierwszego zakrętu."""
-    angle, turn_idx = _first_turn_on_path(path)
-    if turn_idx == -1:
-        return _path_length(path)
-    return _path_length(path[:turn_idx + 1])
-
-
-def _find_critical_turn(
+def _first_turn_with_entry(
         replan_path: List[Tuple[int, int]],
-        v_start: float,
-        accel: float,
         approach_heading: Tuple[int, int] = (0, 0),
-) -> Dict[str, Any]:
+) -> Tuple[float, float]:
     """
-    Sprawdza wykonalność hamowania na replan_path metodą forward-pass.
+    Zwraca (kąt_pierwszego_zakrętu, długość_prostoliniowego_odcinka_od_początku_replan).
 
-    Symuluje drona startującego na początku replan_path z prędkością v_start
-    i kierunkiem approach_heading (kierunek lotu w momencie wejścia w replan_path).
-    Dla każdego zakrętu na trasie sprawdza czy dron zdąży wyhamować do
-    v_safe(angle) na dostępnym odcinku prostoliniowym przed tym zakrętem.
+    Długość liczona jest od indeksu 0 replan_path do węzła pierwszego zakrętu.
+    UWAGA: dla Risk-Aware A* ten odcinek zawiera w sobie bufor hamowania,
+    który jest doczepiony na początku replan_path. Korekta (odjęcie buffer_dist)
+    realizowana jest w analyze_braking_scenario.
 
-    UWAGA: Pierwszy "zakręt" to zmiana kierunku z approach_heading na
-    pierwszy kierunek replan_path. Dla algorytmów klasycznych (które
-    nie planują z aktualnym kierunkiem lotu) ten zakręt często ma 0m
-    odcinka prostego przed sobą — bo dron MA się skręcić natychmiast.
+    Uwzględnia zakręt wjazdowy: jeśli approach_heading różni się od pierwszego
+    kierunku replan_path, to PIERWSZY zakręt następuje na pozycji 0 i prosta
+    przed nim ma długość 0.
 
-    Zwraca:
-        worst_deficit       — największy deficyt drogi hamowania na trasie [m]
-        critical_angle      — kąt zakrętu który okazał się problemowy (rad)
-        critical_v_safe     — bezpieczna prędkość krytycznego zakrętu [m/s]
-        critical_v_approach — prędkość drona w krytycznym zakręcie [m/s]
-        critical_straight   — dostępny prosty odcinek przed krytycznym zakrętem [m]
-        critical_brake_req  — wymagana droga hamowania [m]
-        first_angle         — kąt pierwszego zakrętu na trasie (do informacji)
-        first_straight      — odcinek do pierwszego zakrętu [m]
-        all_feasible        — czy wszystkie zakręty są wykonalne
+    Wartość kąta służy WYŁĄCZNIE do raportowania pod tabelą (która kategoria
+    zakrętu wystąpiła w trasie danego algorytmu). Do oceny wykonalności
+    używany jest jednolity próg WORST_TURN_ANGLE_RAD.
+
+    Brak zakrętu (trasa prosta do celu) → (0.0, długość_całej_replan_path).
     """
-    n = len(replan_path)
-    if n < 2:
-        return {
-            "worst_deficit": 0.0,
-            "critical_angle": 0.0, "critical_v_safe": 0.0,
-            "critical_v_approach": v_start, "critical_straight": 0.0,
-            "critical_brake_req": 0.0,
-            "first_angle": 0.0, "first_straight": _path_length(replan_path),
-            "all_feasible": True,
-        }
+    if len(replan_path) < 2:
+        return 0.0, 0.0
 
-    # Lista (idx_w_replan_path, angle_rad, distance_from_prev_turn)
-    # gdzie idx to indeks węzła w którym następuje zakręt.
-    # Pierwszy element listy uwzględnia zakręt wjazdowy
-    # (z approach_heading na pierwszy kierunek replan_path).
-    turns = []
-
-    # Pierwszy kierunek replan_path
     first_dir = (replan_path[1][0] - replan_path[0][0],
                  replan_path[1][1] - replan_path[0][1])
 
-    # Zakręt wjazdowy (jeżeli approach_heading != first_dir i znamy heading)
+    # Zakręt wjazdowy: heading drona ≠ pierwszy kierunek replan_path
     if approach_heading != (0, 0) and first_dir != (0, 0) and first_dir != approach_heading:
         dot = approach_heading[0] * first_dir[0] + approach_heading[1] * first_dir[1]
         m1 = math.hypot(*approach_heading)
@@ -158,90 +162,14 @@ def _find_critical_turn(
         if m1 * m2 > 0:
             cos_t = max(-1.0, min(1.0, dot / (m1 * m2)))
             entry_angle = math.acos(cos_t)
-            # Zakręt wjazdowy: indeks 0, brak prostej przed nim
-            turns.append((0, entry_angle, 0.0))
+            if entry_angle > 0.01:
+                return entry_angle, 0.0
 
-    # Zakręty wewnętrzne replan_path (zmiana kierunku między i-1, i)
-    last_dir = first_dir
-    last_turn_idx = 0
-    for i in range(2, n):
-        dx = replan_path[i][0] - replan_path[i - 1][0]
-        dy = replan_path[i][1] - replan_path[i - 1][1]
-        curr_dir = (dx, dy)
-        if curr_dir != last_dir:
-            dot = last_dir[0] * curr_dir[0] + last_dir[1] * curr_dir[1]
-            m1 = math.hypot(*last_dir)
-            m2 = math.hypot(*curr_dir)
-            if m1 * m2 > 0:
-                cos_t = max(-1.0, min(1.0, dot / (m1 * m2)))
-                angle = math.acos(cos_t)
-                straight = _path_length(replan_path[last_turn_idx:i])
-                turns.append((i - 1, angle, straight))
-                last_turn_idx = i - 1
-        last_dir = curr_dir
-
-    if not turns:
-        return {
-            "worst_deficit": 0.0,
-            "critical_angle": 0.0, "critical_v_safe": 0.0,
-            "critical_v_approach": 0.0, "critical_straight": 0.0,
-            "critical_brake_req": 0.0,
-            "first_angle": 0.0, "first_straight": _path_length(replan_path),
-            "all_feasible": True,
-        }
-
-    first_angle = turns[0][1]
-    first_straight = turns[0][2]
-
-    # Forward pass: dla każdego zakrętu sprawdź czy dron zdąży wyhamować
-    worst_deficit = 0.0
-    crit = None
-    v = v_start
-
-    for (turn_idx, angle, straight) in turns:
-        v_safe = compute_safe_turn_speed(angle)
-
-        if v > v_safe:
-            brake_required = (v ** 2 - v_safe ** 2) / (2 * accel)
-            if brake_required > straight + 0.01:
-                # Nie zdąży wyhamować — fizycznie niewykonalny zakręt
-                deficit = brake_required - straight
-                if deficit > worst_deficit:
-                    worst_deficit = deficit
-                    crit = {
-                        "angle": angle, "v_safe": v_safe,
-                        "v_approach": v, "straight": straight,
-                        "brake_req": brake_required,
-                    }
-                # Załóż że jakoś przeszedł — kontynuuj z v_safe (modeluje hipotetyczny
-                # nieidealny manewr; w rzeczywistości dron wypadłby z trasy).
-                v = v_safe
-            else:
-                # Zdąży wyhamować na czas
-                v = v_safe
-        else:
-            v = min(v, v_safe)
-
-    if crit is None:
-        return {
-            "worst_deficit": 0.0,
-            "critical_angle": 0.0, "critical_v_safe": 0.0,
-            "critical_v_approach": 0.0, "critical_straight": 0.0,
-            "critical_brake_req": 0.0,
-            "first_angle": first_angle, "first_straight": first_straight,
-            "all_feasible": True,
-        }
-
-    return {
-        "worst_deficit": worst_deficit,
-        "critical_angle": crit["angle"],
-        "critical_v_safe": crit["v_safe"],
-        "critical_v_approach": crit["v_approach"],
-        "critical_straight": crit["straight"],
-        "critical_brake_req": crit["brake_req"],
-        "first_angle": first_angle, "first_straight": first_straight,
-        "all_feasible": False,
-    }
+    # Brak zakrętu wjazdowego — szukaj pierwszego zakrętu wewnętrznego
+    angle, turn_idx = _first_turn_on_path(replan_path)
+    if turn_idx == -1:
+        return 0.0, _path_length(replan_path)
+    return angle, _path_length(replan_path[:turn_idx + 1])
 
 
 def analyze_braking_scenario(
@@ -249,19 +177,25 @@ def analyze_braking_scenario(
         mass: float,
 ) -> Dict[str, Any]:
     """
-    Analizuje scenariusz dynamiczny pod kątem hamowania.
+    Analizuje scenariusz dynamiczny pod kątem hamowania (formuła jednofazowa).
 
-    Logika:
-      - faza reakcji: dron leci dalej z prędkością v_detect przez czas
-        reakcji systemu (proc_delay), pokonując d_reaction. NIE hamuje.
-      - faza bufora (tylko Risk-Aware): dron hamuje na zaplanowanym buforze,
-        wytracając prędkość z v_react_end do v_buffer_end.
-      - faza replanowania: dron leci po nowej trasie. Sprawdzamy każdy
-        zakręt — czy dron zdąży wyhamować do v_safe(angle) na odcinku
-        prostoliniowym przed tym zakrętem.
+    [METODOLOGIA]
+    WYMAGANA droga hamowania liczona jest dla najgorszego możliwego zakrętu
+    na siatce 8-kierunkowej (135°), niezależnie od tego, jaki konkretnie
+    zakręt wygenerował algorytm. Zapewnia to pełną porównywalność między
+    algorytmami: ocenie podlega zdolność systemu do bezpiecznego hamowania,
+    a nie szczęśliwy zbieg okoliczności geometrii trasy.
 
-    Wynik wykonalności = wszystkie zakręty na nowej trasie są możliwe
-    do bezpiecznego przejścia z aktualnym profilem prędkości.
+    Pełna droga hamowania od v_detect do v_safe(135°) traktowana jest jako
+    JEDNA CIĄGŁA droga obejmująca trzy fazy:
+      - reakcję (faza bezwładności systemu),
+      - bufor hamowania awaryjnego (jeśli istnieje; tylko Risk-Aware A*),
+      - prostoliniowy odcinek replan_path PO buforze.
+    Wszystkie z tym samym przyspieszeniem a = F/m.
+
+        DOSTĘPNA = d_reaction + d_buffer + d_straight_post_buffer
+        WYMAGANA = (v_detect² − v_safe(135°)²) / (2a)
+        deficyt  = max(0, WYMAGANA − DOSTĘPNA)
 
     Argumenty:
         scenario_result: wynik _compute_full_scenario z plotter.py
@@ -281,8 +215,10 @@ def analyze_braking_scenario(
             "valid": True,
             "v_detect": v_detect,
             "d_reaction": 0.0, "d_buffer": 0.0,
-            "d_to_first_turn": 0.0, "d_available": 0.0,
-            "v_safe_first_turn": 0.0, "d_required": 0.0,
+            "d_straight_post_buffer": 0.0,
+            "d_available": 0.0,
+            "v_safe_uniform": 0.0, "d_required": 0.0,
+            "first_turn_angle": 0.0,
             "feasible": False, "deficit": float("inf"),
             "message": "KOLIZJA W FAZIE REAKCJI",
         }
@@ -291,7 +227,6 @@ def analyze_braking_scenario(
 
     v_detect = scenario_result.get("v_detect", 0.0)
     v_react_end = scenario_result.get("v_react_end", v_detect)
-    v_buffer_end = scenario_result.get("v_buffer_end", v_react_end)
     detect_idx = scenario_result.get("detect_idx", -1)
     react_idx = scenario_result.get("react_idx", -1)
     clean_path = scenario_result.get("clean_path", [])
@@ -299,67 +234,69 @@ def analyze_braking_scenario(
     replan_path = scenario_result.get("replan_path", [])
     heading = scenario_result.get("heading", (0, 0))
 
-    # Faza reakcji: dron leci nie hamując (dystans = ile przeleciał między
-    # detect_idx a react_idx na clean_path)
+    # ── DROGA REAKCJI ───────────────────────────────────────────────────
+    # Faza bezwładności systemu: dron HAMUJE zgodnie z v_react_end = v_detect - a·t_proc
+    # (zobacz plotter.py:300). Długość = odcinek clean_path[detect_idx..react_idx].
     if detect_idx >= 0 and react_idx > detect_idx and clean_path:
         d_reaction = _path_length(clean_path[detect_idx:react_idx + 1])
     else:
         d_reaction = 0.0
 
-    # Prędkość startowa replan_path = po zakończeniu bufora (lub po reakcji
-    # jeśli brak bufora — wtedy v_buffer_end == v_react_end).
-    v_start_replan = v_buffer_end
+    # ── FAKTYCZNY PIERWSZY ZAKRĘT TRASY REPLANOWANIA ───────────────────
+    # d_to_turn_raw — długość prostoliniowej części od indeksu 0 replan_path.
+    # Dla R-A A* zawiera w sobie bufor (bufor jest doczepiony na początku).
+    # Kąt — TYLKO informacyjnie, do raportowania pod tabelą.
+    # Do oceny wykonalności używamy jednolitego progu 135°.
+    first_angle, d_to_turn_raw = _first_turn_with_entry(
+        replan_path, approach_heading=heading
+    )
 
-    # Sprawdź wszystkie zakręty na replan_path (forward-pass fizyki)
-    crit = _find_critical_turn(replan_path, v_start_replan, a,
-                                approach_heading=heading)
+    # ── PROSTA PO BUFORZE ───────────────────────────────────────────────
+    # Wycinamy z d_to_turn_raw tę część, która jest buforem, żeby trzy
+    # kolumny reak / bufor / prosta były rozłączne i poprawnie sumowały
+    # się do DOSTĘPNEJ.
+    d_straight_post_buffer = max(0.0, d_to_turn_raw - buffer_dist)
 
-    if crit["all_feasible"]:
-        feasible = True
-        deficit = 0.0
-        # Pierwszy zakręt jako referencja (informacyjnie)
-        ref_angle = crit["first_angle"]
-        ref_straight = crit["first_straight"]
-        msg_turn = (f"zakręt {math.degrees(ref_angle):.0f}° "
-                    f"(wszystkie wykonalne)" if ref_angle > 0
-                    else "brak zakrętu")
+    # ── JEDNOLITY PRÓG: NAJGORSZY ZAKRĘT NA SIATCE 8-KIERUNKOWEJ ────────
+    # Identyczny dla wszystkich trzech algorytmów — zapewnia porównywalność.
+    v_safe_uniform = compute_safe_turn_speed(WORST_TURN_ANGLE_RAD)
+
+    # ── WYMAGANA DROGA HAMOWANIA (jednofazowo, od v_detect) ─────────────
+    # Pełna droga od momentu detekcji (v_detect) do bezpiecznej prędkości
+    # najgorszego zakrętu (v_safe_uniform). Ta sama formuła, ten sam próg,
+    # dla wszystkich algorytmów.
+    if v_detect > v_safe_uniform:
+        d_required = (v_detect ** 2 - v_safe_uniform ** 2) / (2.0 * a)
     else:
-        feasible = False
-        deficit = crit["worst_deficit"]
-        ref_angle = crit["critical_angle"]
-        ref_straight = crit["critical_straight"]
-        msg_turn = f"krytyczny zakręt {math.degrees(ref_angle):.0f}°"
+        d_required = 0.0
 
-    # Bezpieczna prędkość zakrętu referencyjnego (pierwszy lub krytyczny)
-    v_safe_ref = compute_safe_turn_speed(ref_angle) if ref_angle > 0 else 0.0
+    # ── DOSTĘPNA DROGA HAMOWANIA (suma trzech rozłącznych faz) ──────────
+    # Łączny odcinek od momentu detekcji do pierwszego zakrętu na replan_path:
+    #   - reakcja: dron HAMUJE w tej fazie (v_detect → v_react_end),
+    #   - bufor: zaplanowany odcinek hamowania awaryjnego (Risk-Aware A*),
+    #   - prosta: prostoliniowy odcinek replan_path PO buforze.
+    d_available = d_reaction + buffer_dist + d_straight_post_buffer
 
-    # ── PEŁNA DROGA HAMOWANIA OD v_detect DO v_safe ─────────────────────
-    # Tyle metrów potrzeba aby od momentu wykrycia (v=18 m/s) wyhamować
-    # do bezpiecznej prędkości pierwszego/krytycznego zakrętu.
-    # NIE uwzględnia drogi reakcji (bo w reakcji dron NIE hamuje).
-    if v_detect > v_safe_ref:
-        d_total_braking = (v_detect ** 2 - v_safe_ref ** 2) / (2.0 * a)
+    # ── DEFICYT I STATUS ────────────────────────────────────────────────
+    deficit = max(0.0, d_required - d_available)
+    feasible = (deficit < 0.01)
+
+    if first_angle > 0:
+        msg_turn = f"zakręt {math.degrees(first_angle):.0f}°"
     else:
-        d_total_braking = 0.0
-
-    # ── RZECZYWIŚCIE PRZEBYTA DROGA OD DETEKCJI DO REFERENCYJNEGO ZAKRĘTU ──
-    # Suma: reakcja + bufor + odcinek prostoliniowy replan_path do zakrętu
-    d_total_traveled = d_reaction + buffer_dist + ref_straight
-
-    # ── DROGA DOSTĘPNA NA HAMOWANIE = przebyta - reakcja ────────────────
-    # (w fazie reakcji dron NIE hamuje, więc ta droga się nie liczy)
-    d_available_for_braking = buffer_dist + ref_straight
+        msg_turn = "brak zakrętu"
 
     return {
         "valid": True,
         "v_detect": v_detect,
+        "v_react_end": v_react_end,
         "d_reaction": d_reaction,
         "d_buffer": buffer_dist,
-        "d_to_turn": ref_straight,
-        "d_total_traveled": d_total_traveled,
-        "d_available_for_braking": d_available_for_braking,
-        "d_total_braking": d_total_braking,
-        "v_safe_ref": v_safe_ref,
+        "d_straight_post_buffer": d_straight_post_buffer,
+        "d_available": d_available,
+        "d_required": d_required,
+        "v_safe_uniform": v_safe_uniform,
+        "first_turn_angle": first_angle,
         "feasible": feasible,
         "deficit": deficit,
         "message": msg_turn,
@@ -381,9 +318,14 @@ def print_braking_comparison(
     """
     print()
     print("═" * 100)
-    print(f"  ANALIZA HAMOWANIA OD WYKRYCIA ZAGROŻENIA DO PIERWSZEGO ZAKRĘTU")
+    print(f"  ANALIZA HAMOWANIA OD WYKRYCIA ZAGROŻENIA DO BEZPIECZNEJ PRĘDKOŚCI")
     print(f"  m = {mass:.0f} kg | W = {risk_weight:.0f} | "
           f"przeszkoda: ({obstacle_pos[0]}, {obstacle_pos[1]})")
+
+    # Informacja o jednolitym progu oceny
+    v_safe_uniform = compute_safe_turn_speed(WORST_TURN_ANGLE_RAD)
+    print(f"  Próg oceny: najgorszy zakręt na siatce (135°), "
+          f"v_safe = {v_safe_uniform:.2f} m/s (jednolity dla wszystkich algorytmów)")
     print("═" * 100)
 
     # Nagłówek tabeli
@@ -392,7 +334,7 @@ def print_braking_comparison(
           f"{'reak':>8}"
           f"{'bufor':>8}"
           f"{'prosta':>8}"
-          f"{'PRZEBYTA':>11}"
+          f"{'DOSTĘPNA':>11}"
           f"{'WYMAGANA':>11}"
           f"{'deficyt':>10}"
           f"{'status':>15}")
@@ -416,37 +358,36 @@ def print_braking_comparison(
 
         status_text = "WYKONALNY" if r["feasible"] else "NIEWYKONALNY"
 
-        # PRZEBYTA = bufor + prosta (droga w której dron MA możliwość hamowania)
-        # Reakcja jest osobno bo w niej dron NIE hamuje
-        d_braking_avail = r["d_available_for_braking"]
-
         print(f"  {algo_name:<16}"
               f"{r['v_detect']:>8.2f}"
               f"{r['d_reaction']:>8.2f}"
               f"{r['d_buffer']:>8.2f}"
-              f"{r['d_to_turn']:>8.2f}"
-              f"{d_braking_avail:>11.2f}"
-              f"{r['d_total_braking']:>11.2f}"
+              f"{r['d_straight_post_buffer']:>8.2f}"
+              f"{r['d_available']:>11.2f}"
+              f"{r['d_required']:>11.2f}"
               f"{r['deficit']:>10.2f}"
               f"{status_text:>15}")
 
     print("  " + "─" * 98)
     print(f"  Legenda kolumn:")
     print(f"    v_det     — prędkość drona w momencie wykrycia zagrożenia [m/s]")
-    print(f"    reak      — droga reakcji (dron leci, NIE hamuje — bezwładność systemu) [m]")
-    print(f"    bufor     — zaplanowany odcinek hamowania (część systemu Risk-Aware A*) [m]")
-    print(f"    prosta    — odcinek prostoliniowy nowej trasy do pierwszego zakrętu [m]")
-    print(f"    PRZEBYTA  — łączna droga dostępna NA HAMOWANIE = bufor + prosta [m]")
-    print(f"    WYMAGANA  — pełna droga hamowania od v_det do v_safe pierwszego zakrętu [m]")
-    print(f"    deficyt   — WYMAGANA - PRZEBYTA (>0 oznacza, że dron nie zdąży wyhamować)")
+    print(f"    reak      — droga w fazie bezwładności systemu (dron HAMUJE: v_det → v_react_end) [m]")
+    print(f"    bufor     — zaplanowany odcinek hamowania awaryjnego (tylko Risk-Aware A*) [m]")
+    print(f"    prosta    — prostoliniowy odcinek replan_path PO BUFORZE, przed pierwszym zakrętem [m]")
+    print(f"    DOSTĘPNA  — łączna droga na hamowanie = reak + bufor + prosta [m]")
+    print(f"    WYMAGANA  — droga hamowania od v_det do v_safe NAJGORSZEGO zakrętu (135°) [m]")
+    print(f"    deficyt   — WYMAGANA − DOSTĘPNA (>0 oznacza fizyczną niewykonalność manewru)")
     print()
 
-    # Linia z informacją o zakręcie
+    # Informacja o faktycznym pierwszym zakręcie każdego algorytmu (informacyjnie)
+    print(f"  Pierwsze zakręty na trasach replanowania (informacyjnie, nie wpływają na ocenę):")
     for algo_name in ("Dijkstra", "A* Standard", "Risk-Aware A*"):
         r = results.get(algo_name)
-        if r and r.get("valid") and "message" in r:
-            v_safe = r.get("v_safe_ref", 0.0)
-            print(f"    {algo_name:<16} → {r['message']}, v_safe = {v_safe:.2f} m/s")
+        if r and r.get("valid") and r.get("first_turn_angle", 0) > 0:
+            angle_deg = math.degrees(r["first_turn_angle"])
+            print(f"    {algo_name:<16} → {angle_deg:.0f}°")
+        elif r and r.get("valid"):
+            print(f"    {algo_name:<16} → brak zakrętu (trasa prosta)")
 
     print("═" * 100)
     print()

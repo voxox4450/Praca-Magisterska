@@ -381,8 +381,10 @@ def base_search(
         # [FIX #32] Ujednolicony format klucza stanu
         sd_current = current.straight_dist
         if use_kinematics:
+            #bucket = 0
             bucket = _braking_bucket(sd_current)
         else:
+            # bucket = _braking_bucket(sd_current)
             bucket = 0
 
         state_key = (current.x, current.y,
@@ -456,6 +458,7 @@ def base_search(
                     new_straight_dist = 0.0
 
                 new_bucket = _braking_bucket(new_straight_dist)
+                #new_bucket = 0
 
             # ── MODEL KLASYCZNY (Dijkstra / A* Standard) ──────────────────
             else:
@@ -466,6 +469,7 @@ def base_search(
 
                 # [OPT] Bucket zawsze 0 — ten sam format klucza, brak duplikatów
                 new_bucket = 0
+                #new_bucket = _braking_bucket(new_straight_dist)
 
             new_g = cur_cost + dist_cost + static_risk_cost + turn_cost
 
