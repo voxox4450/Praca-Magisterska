@@ -3,6 +3,7 @@ import matplotlib.patheffects as pe
 from matplotlib.widgets import Slider
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.collections import LineCollection
+from matplotlib.lines import Line2D
 import numpy as np
 import scipy.interpolate as interp
 import math
@@ -25,6 +26,29 @@ from visualization.metrics_terminal import (
 )
 
 
+def _build_legend_handles():
+    """Jednolita legenda — identyczna kolejność dla wszystkich trzech okien."""
+    return [
+        Line2D([0], [0], color='gray', linestyle='--', linewidth=2.5,
+               label='Pierwotny Plan'),
+        Line2D([0], [0], color='orange', linestyle=':', linewidth=4,
+               label='Czas Reakcji'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='yellow',
+               markersize=10, linestyle='None', markeredgecolor='black',
+               label='Punkt Wykrycia'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='lime',
+               markersize=10, linestyle='None', markeredgecolor='black',
+               label='Start'),
+        Line2D([0], [0], marker='X', color='w', markerfacecolor='magenta',
+               markersize=10, linestyle='None', markeredgecolor='black',
+               label='Cel'),
+        Line2D([0], [0], marker='s', color='w', markerfacecolor='#000000',
+               markersize=10, linestyle='None', markeredgecolor='black',
+               label='Twarda Strefa Ryzyka'),
+        Line2D([0], [0], color='dodgerblue', linewidth=5, label='Trasa'),
+    ]
+
+
 def _setup_ui_colorbars(fig, ax, img, speed_axes_rect: list,
                         risk_fraction: float = 0.046,
                         risk_pad: float = 0.05,
@@ -40,7 +64,6 @@ def _setup_ui_colorbars(fig, ax, img, speed_axes_rect: list,
     sm = plt.cm.ScalarMappable(cmap=get_speed_cmap(), norm=plt.Normalize(0, V_MAX_MS))
     sm.set_array([])
     cbar_speed = fig.colorbar(sm, cax=cax_speed, orientation='horizontal')
-    # cbar_speed.set_label('Prędkość Kinematyczna [m/s]', color='white', labelpad=10)
     cax_speed.text(-0.02, 0.5, 'Prędkość [m/s] ',
                    transform=cax_speed.transAxes,
                    va='center', ha='right', color='white')
@@ -599,34 +622,30 @@ def run_online_simulation(
     initial_accel = MAX_THRUST_NET_N / DRONE_MASS_KG
     global_speeds = compute_path_speeds(path_global, accel=initial_accel)
 
-    line_global, = ax.plot(gx_smooth, gy_smooth, color='gray', linestyle='--', linewidth=2.5, alpha=0.8,
-                           label='Pierwotny Plan')
+    # Trasa pierwotna (szara przerywana) — bez etykiety, legenda budowana ręcznie
+    line_global, = ax.plot(gx_smooth, gy_smooth, color='gray', linestyle='--', linewidth=2.5, alpha=0.8)
 
     lc_flown_bg = LineCollection([], colors='#555555', linewidths=7, alpha=0.4, zorder=3)
     lc_flown = LineCollection([], cmap=get_speed_cmap(), linewidths=5, norm=plt.Normalize(0, V_MAX_MS), zorder=4)
     ax.add_collection(lc_flown_bg)
     ax.add_collection(lc_flown)
-    ax.plot([], [], color='lime', linewidth=5, label='Droga Przebyta', zorder=0)
 
-    line_reaction, = ax.plot([], [], color='orange', linestyle=':', linewidth=4,
-                             label='Czas Reakcji (Bezwładność)', zorder=4)
+    line_reaction, = ax.plot([], [], color='orange', linestyle=':', linewidth=4, zorder=4)
 
     lc_new_bg = LineCollection([], colors='#555555', linewidths=7, alpha=0.4, zorder=4)
     lc_new = LineCollection([], cmap=get_speed_cmap(), linewidths=5, norm=plt.Normalize(0, V_MAX_MS), zorder=5)
     ax.add_collection(lc_new_bg)
     ax.add_collection(lc_new)
 
-    line_proxy, = ax.plot([], [], color='cyan', linewidth=5, label='Replanowana Trasa',
-                          path_effects=[pe.withStroke(linewidth=7, foreground="#555555")], zorder=4)
-
-    ax.scatter([start[0]], [start[1]], color='lime', s=150, label='Start', edgecolors='black', zorder=5)
-    goal_marker = ax.scatter([goal[0]], [goal[1]], color='magenta', marker='X', s=150, label='Cel',
+    ax.scatter([start[0]], [start[1]], color='lime', s=150, edgecolors='black', zorder=5)
+    goal_marker = ax.scatter([goal[0]], [goal[1]], color='magenta', marker='X', s=150,
                              edgecolors='black', zorder=5)
-    drone_marker, = ax.plot([], [], 'o', color='yellow', markersize=12, label='Wykrycie (Zasięg)',
+    drone_marker, = ax.plot([], [], 'o', color='yellow', markersize=12,
                             markeredgecolor='black', zorder=6)
 
-    legend = ax.legend(loc='lower left', bbox_to_anchor=(1.04, -0.01), facecolor='#333333',
-                       edgecolor='white', title="Legenda Elementów")
+    legend = ax.legend(handles=_build_legend_handles(),
+                       loc='lower left', bbox_to_anchor=(1.04, -0.01), facecolor='#333333',
+                       edgecolor='white', title="Risk-Aware A*")
     plt.setp(legend.get_texts(), color='white')
     plt.setp(legend.get_title(), color='white')
 
@@ -706,14 +725,6 @@ def run_online_simulation(
 
         # ── RAPORT METRYK HAMOWANIA: 3 algorytmy w terminalu ──────────────
         if func_dijkstra is not None and func_astar is not None:
-            # [METODOLOGIA] Wszystkie trzy systemy wywoływane są tym samym kodem
-            # i otrzymują identyczne dane wejściowe (mapa, masa, prędkość, kierunek).
-            # Symulator nie steruje obecnością ani brakiem bufora hamowania —
-            # to wynika wyłącznie z zawartości pliku algorytmu: Risk-Aware A*
-            # zawiera funkcję _plan_braking_buffer w a_star_risk.py i wywołuje
-            # ją wewnątrz siebie, klasyczne algorytmy nie zawierają tej funkcji.
-            # Różnica między systemami sprowadza się do JEDNEJ zmiennej:
-            # obecności modelu fizyki lotu w kodzie algorytmu.
             result_dij = _compute_full_scenario(env, start, goal, func_dijkstra,
                                                 w, m, sim_state["obstacle_pos"],
                                                 grid_before)
@@ -802,10 +813,9 @@ def _open_comparison_windows(
                             speed_axes_rect=[0.155, 0.13, 0.59, 0.02],
                             risk_fraction=0.048, risk_pad=0.045, risk_shrink=0.72)
 
-        # Oryginalna trasa (szara przerywana) — dynamiczna
+        # Oryginalna trasa (szara przerywana) — bez etykiety
         gx_s, gy_s = smooth_path_bspline(sim_state["path_global"])
-        global_line_cmp, = ax_cmp.plot(gx_s, gy_s, color='gray', linestyle='--', linewidth=2, alpha=0.5,
-                                       label='Pierwotny Plan')
+        global_line_cmp, = ax_cmp.plot(gx_s, gy_s, color='gray', linestyle='--', linewidth=2, alpha=0.5)
 
         # Droga przebyta — dynamiczna
         lc_f_bg = LineCollection([], colors='#555555', linewidths=7, alpha=0.4, zorder=3)
@@ -814,26 +824,22 @@ def _open_comparison_windows(
         ax_cmp.add_collection(lc_f_bg)
         ax_cmp.add_collection(lc_f)
 
-        # Czas reakcji (pomarańczowa) i Punkt wykrycia przypisujemy do zmiennych
-        line_reaction_cmp, = ax_cmp.plot([], [], color='orange', linestyle=':', linewidth=4, label='Czas Reakcji',
-                                         zorder=4)
-        detect_dot_cmp, = ax_cmp.plot([], [], 'o', color='yellow', markersize=12, markeredgecolor='black', zorder=6,
-                                      label='Punkt Wykrycia')
+        # Czas reakcji (pomarańczowa) i Punkt wykrycia — bez etykiet
+        line_reaction_cmp, = ax_cmp.plot([], [], color='orange', linestyle=':', linewidth=4, zorder=4)
+        detect_dot_cmp, = ax_cmp.plot([], [], 'o', color='yellow', markersize=12, markeredgecolor='black', zorder=6)
 
-        # Start i cel
-        ax_cmp.scatter([start[0]], [start[1]], color='lime', s=150, label='Start', edgecolors='black', zorder=5)
-        ax_cmp.scatter([goal[0]], [goal[1]], color='magenta', marker='X', s=150, label='Cel', edgecolors='black',
-                       zorder=5)
+        # Start i cel — bez etykiet
+        ax_cmp.scatter([start[0]], [start[1]], color='lime', s=150, edgecolors='black', zorder=5)
+        ax_cmp.scatter([goal[0]], [goal[1]], color='magenta', marker='X', s=150, edgecolors='black', zorder=5)
 
         # Replanowana trasa (dynamiczna)
         lc_n_bg = LineCollection([], colors='#555555', linewidths=7, alpha=0.4, zorder=4)
         lc_n = LineCollection([], cmap=get_speed_cmap(), linewidths=5, norm=plt.Normalize(0, V_MAX_MS), zorder=5)
         ax_cmp.add_collection(lc_n_bg)
         ax_cmp.add_collection(lc_n)
-        ax_cmp.plot([], [], color='cyan', linewidth=5, label='Replanowana Trasa',
-                    path_effects=[pe.withStroke(linewidth=7, foreground="#555555")])
 
-        legend_cmp = ax_cmp.legend(loc='lower left', bbox_to_anchor=(1.04, -0.01), facecolor='#333333',
+        legend_cmp = ax_cmp.legend(handles=_build_legend_handles(),
+                                   loc='lower left', bbox_to_anchor=(1.04, -0.01), facecolor='#333333',
                                    edgecolor='white', title=algo_name)
         plt.setp(legend_cmp.get_texts(), color='white')
         plt.setp(legend_cmp.get_title(), color='white')
