@@ -12,11 +12,7 @@ def run_astar(
         initial_direction: Tuple[int, int] = (0, 0), current_speed: float = 0.0,
         drone_mass: float = DRONE_MASS_KG
 ) -> Tuple[List[Tuple[int, int]], Dict[str, Any]]:
-    """
-    A* Standard z modelem kontroli drona.
-    Heurystyka euklidesowa (ε-dopuszczalna) → szybsze niż Dijkstra.
-    Brak kinematyki → nie uwzględnia profilu prędkości.
-    """
+
     return base_search(
         grid_map, start, goal, risk_weight, turn_penalty, drone_radius,
         initial_direction, current_speed,

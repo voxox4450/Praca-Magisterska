@@ -1,5 +1,4 @@
 import os
-import time
 import random
 import numpy as np
 import matplotlib.pyplot as plt
@@ -21,12 +20,10 @@ def create_grouped_bar_chart(data_dijkstra, data_astar, data_risk, labels, ylabe
 
     fig, ax = plt.subplots(figsize=(10, 6))
 
-    # Rysowanie słupków
     rects1 = ax.bar(x - width, data_dijkstra, width, label='Dijkstra', color='#4472C4')
     rects2 = ax.bar(x, data_astar, width, label='A* Standard', color='#ED7D31')
     rects3 = ax.bar(x + width, data_risk, width, label='Risk-Aware A*', color='#70AD47')
 
-    # Dodawanie etykiet i formatowanie
     ax.set_ylabel(ylabel, fontsize=12)
     ax.set_title(title, fontsize=14, pad=20)
     ax.set_xticks(x)
@@ -35,7 +32,6 @@ def create_grouped_bar_chart(data_dijkstra, data_astar, data_risk, labels, ylabe
     ax.legend(fontsize=11)
     ax.grid(axis='y', linestyle='--', alpha=0.7)
 
-    # Wartości nad słupkami z dynamicznym formatowaniem (np. %.2f dla sekund, %d dla węzłów)
     def autolabel(rects):
         for rect in rects:
             height = rect.get_height()
@@ -55,17 +51,14 @@ def create_grouped_bar_chart(data_dijkstra, data_astar, data_risk, labels, ylabe
 
 
 def run_performance_benchmark():
-    # Zapewnienie istnienia katalogu /data
     os.makedirs('data', exist_ok=True)
 
-    # Ustawienie stałego seeda dla powtarzalności środowiska między algorytmami
     random.seed(RANDOM_SEED)
     np.random.seed(RANDOM_SEED)
 
     densities = [0.05, 0.15, 0.30]
     iterations = 20  # Liczba map generowanych dla każdego poziomu gęstości
 
-    # Listy do zebrania danych na wykresy
     avg_times_dijkstra, avg_nodes_dijkstra = [], []
     avg_times_astar, avg_nodes_astar = [], []
     avg_times_risk, avg_nodes_risk = [], []
@@ -83,9 +76,6 @@ def run_performance_benchmark():
         valid_iterations = 0
 
         for i in range(iterations):
-            # [Rzetelność] Reset ziarna przed każdą mapą:
-            # Gwarantuje, że przy każdej iteracji (i=0..4) generator
-            # znajduje się w tym samym stanie co w głównym programie
             current_seed = RANDOM_SEED + i
             random.seed(current_seed)
             np.random.seed(current_seed)
@@ -123,7 +113,6 @@ def run_performance_benchmark():
             # Bierzemy pod uwagę tylko te mapy, gdzie wszystkie 3 algorytmy znalazły cel
             if (path_d and path_a and path_r and
                     stats_d.get('found') and stats_a.get('found') and stats_r.get('found')):
-                # Czas pozostaje w sekundach (bez mnożenia przez 1000)
                 total_time_dijkstra += stats_d.get('time', 0)
                 total_nodes_dijkstra += stats_d.get('nodes', 0)
 
@@ -156,7 +145,6 @@ def run_performance_benchmark():
     print("=" * 85)
     print("Generowanie wykresów do katalogu /data...")
 
-    # Generowanie wykresu z CZASEM (format %.2f dla sekund)
     create_grouped_bar_chart(
         data_dijkstra=avg_times_dijkstra,
         data_astar=avg_times_astar,
@@ -168,7 +156,6 @@ def run_performance_benchmark():
         val_fmt='%.2f'
     )
 
-    # Generowanie wykresu z WĘZŁAMI (format %d dla liczb całkowitych)
     create_grouped_bar_chart(
         data_dijkstra=avg_nodes_dijkstra,
         data_astar=avg_nodes_astar,

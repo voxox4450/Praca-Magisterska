@@ -12,13 +12,7 @@ def run_dijkstra(
         initial_direction: Tuple[int, int] = (0, 0), current_speed: float = 0.0,
         drone_mass: float = DRONE_MASS_KG
 ) -> Tuple[List[Tuple[int, int]], Dict[str, Any]]:
-    """
-    Dijkstra z modelem kontroli drona.
-    Kara za zakręt proporcjonalna do kąta (wspólna formuła — patrz config.py).
-    Brak heurystyki → eksploruje równomiernie, gwarantuje optymalność kosztową.
-    Brak kinematyki → nie uwzględnia profilu prędkości.
-    Rola: baseline/referencja.
-    """
+
     return base_search(
         grid_map, start, goal, risk_weight, turn_penalty, drone_radius,
         initial_direction, current_speed,

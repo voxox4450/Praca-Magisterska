@@ -1,5 +1,4 @@
 import matplotlib.pyplot as plt
-import matplotlib.patheffects as pe
 from matplotlib.widgets import Slider
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.collections import LineCollection
@@ -11,14 +10,13 @@ from typing import List, Tuple, Callable, Any, Dict
 from environment.grid_map import GridMap
 from algorithms.common import (
     calculate_segment_risk, calculate_path_length,
-    calculate_kinematic_flight_time, compute_turn_cost, compute_safe_turn_speed,
+    calculate_kinematic_flight_time, compute_safe_turn_speed,
     collision_radius_for_mass, drone_radius_for_mass,
     sensor_range_for_mass, processing_delay_for_mass
 )
 from config import (
     V_MAX_MS, ACCELERATION,
-    RISK_WEIGHT, TURN_PENALTY,
-    COLLISION_RADIUS, OBSTACLE_RADIUS,
+    RISK_WEIGHT, TURN_PENALTY, OBSTACLE_RADIUS,
     DRONE_MASS_KG, MAX_THRUST_NET_N
 )
 from visualization.metrics_terminal import (
@@ -121,10 +119,6 @@ def smooth_path_bspline(path: List[Tuple[int, int]]) -> Tuple[np.ndarray, np.nda
         return np.array(x), np.array(y)
 
 
-# [FIX #10] Profil prędkości — dokumentacja spójności z planistą.
-# Planista (base_search) liczy forward-only z ograniczeniami zakrętów.
-# Wizualizacja dodaje backward pass (hamowanie PRZED zakrętem) i forward enforce,
-# co jest fizycznie konieczne — planista implicite zakłada że dron wyhamuje.
 def compute_path_speeds(path: List[Tuple[int, int]], initial_speed: float = 0.0,
                         accel: float = ACCELERATION, stop_at_end: bool = True) -> np.ndarray:
     if len(path) < 2:
@@ -154,17 +148,16 @@ def compute_path_speeds(path: List[Tuple[int, int]], initial_speed: float = 0.0,
 
     speeds[0] = initial_speed
 
-    # Pass 1: Forward (rozpędzanie)
+    # Forward (rozpędzanie)
     for i in range(1, len(path)):
         dist = math.hypot(path[i][0] - path[i - 1][0], path[i][1] - path[i - 1][1])
         speeds[i] = min(turn_speeds[i], math.sqrt(speeds[i - 1] ** 2 + 2 * a * dist), v_max)
 
-    # Pass 2: Backward (hamowanie przed zakrętami)
+    # Backward (hamowanie przed zakrętami)
     for i in range(len(path) - 2, -1, -1):
         dist = math.hypot(path[i + 1][0] - path[i][0], path[i + 1][1] - path[i][1])
         speeds[i] = min(speeds[i], math.sqrt(speeds[i + 1] ** 2 + 2 * a * dist))
 
-    # Pass 3: Enforce fizyczny warunek brzegowy (prędkość startowa jest faktem)
     speeds[0] = initial_speed
     for i in range(1, len(path)):
         dist = math.hypot(path[i][0] - path[i - 1][0], path[i][1] - path[i - 1][1])
@@ -209,12 +202,6 @@ def smooth_path_with_speeds(path: List[Tuple[int, int]], speeds: np.ndarray,
         return np.array(x), np.array(y), speeds
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# WSPÓLNA FUNKCJA OBLICZENIOWA
-# Oblicza pełny scenariusz dla dowolnego algorytmu: trasa czysta → detekcja →
-# reakcja → replan. Zwraca dict z danymi do wizualizacji i statystykami.
-# Używana przez update_route (Risk-Aware) i update_cmp (Dijkstra/A*).
-# ─────────────────────────────────────────────────────────────────────────────
 def _compute_full_scenario(env, start, goal, algo_func, w, m, click_pos, grid_before):
     """
     Oblicza pełny scenariusz omijania przeszkody.
@@ -228,8 +215,6 @@ def _compute_full_scenario(env, start, goal, algo_func, w, m, click_pos, grid_be
         kinematyczny pozwalający obliczyć wymaganą drogę hamowania.
       - Dijkstra / A*: nie planują bufora, bo pojęcie "bufora hamowania"
         jest bez modelu kinematycznego nieokreślone.
-    Symulator (ta funkcja) nie zna tych różnic i nie podejmuje za algorytm
-    żadnych decyzji kinematycznych.
     """
     a = MAX_THRUST_NET_N / m
     col_r = collision_radius_for_mass(m)
@@ -238,7 +223,6 @@ def _compute_full_scenario(env, start, goal, algo_func, w, m, click_pos, grid_be
 
     result = {}
 
-    # ── KROK 1: Planuj na czystej mapie ──────────────────────────────────
     grid_dirty = env.grid.copy()
     risk_dirty = env.risk_grid.copy()
     dist_dirty = env.dist_matrix.copy()
@@ -254,7 +238,6 @@ def _compute_full_scenario(env, start, goal, algo_func, w, m, click_pos, grid_be
                                         turn_penalty=TURN_PENALTY,
                                         drone_radius=col_r, drone_mass=m)
 
-    # Przywróć brudną mapę
     env.grid = grid_dirty
     env.risk_grid = risk_dirty
     env.dist_matrix = dist_dirty
@@ -274,7 +257,6 @@ def _compute_full_scenario(env, start, goal, algo_func, w, m, click_pos, grid_be
                           clean_stats['risk'],
                           clean_stats.get('turns', 0))
 
-    # ── KROK 2: Sprawdź czy przeszkoda blokuje trasę ─────────────────────
     CRASH_DIST = OBSTACLE_RADIUS + col_r
     is_blocked = any(
         math.sqrt((px - cx) ** 2 + (py - cy) ** 2) <= CRASH_DIST
@@ -288,7 +270,6 @@ def _compute_full_scenario(env, start, goal, algo_func, w, m, click_pos, grid_be
 
     result['blocked'] = True
 
-    # ── KROK 3: Detekcja i reakcja ───────────────────────────────────────
     sensor_range = sensor_range_for_mass(m)
     proc_delay = processing_delay_for_mass(m)
 
@@ -307,10 +288,8 @@ def _compute_full_scenario(env, start, goal, algo_func, w, m, click_pos, grid_be
     t_react = min(proc_delay, t_stop)
     react_dist = (v_detect * t_react) - (0.5 * a * (t_react ** 2))
 
-    # [POPRAWKA 1] Przywrócone wyliczenie prędkości na końcu fazy reakcji
     v_react_end = max(0.0, v_detect - a * proc_delay)
 
-    # Iteruj po rzeczywistym dystansie ścieżki
     accumulated_dist = 0.0
     react_idx = detect_idx
     for i in range(detect_idx, len(clean_path) - 1):
@@ -322,7 +301,6 @@ def _compute_full_scenario(env, start, goal, algo_func, w, m, click_pos, grid_be
         if accumulated_dist >= react_dist:
             break
 
-    # [POPRAWKA 2] Usunięta błędna linijka wykorzystująca `react_indices`
 
     reaction_path = clean_path[detect_idx:react_idx + 1]
     drone_pos = clean_path[react_idx]
@@ -334,7 +312,6 @@ def _compute_full_scenario(env, start, goal, algo_func, w, m, click_pos, grid_be
     result['reaction_path'] = reaction_path
     result['drone_pos'] = drone_pos
 
-    # Heading z reakcji
     if len(reaction_path) >= 2:
         ldx = reaction_path[-1][0] - reaction_path[-2][0]
         ldy = reaction_path[-1][1] - reaction_path[-2][1]
@@ -354,7 +331,7 @@ def _compute_full_scenario(env, start, goal, algo_func, w, m, click_pos, grid_be
         return result
     result['crash'] = False
 
-    # ── KROK 4: Replanowanie (algorytm sam decyduje o buforze) ───────────
+    # Replanowanie
     env.update_drone_footprint(phys_r, col_r)
 
     replan_path, replan_stats = algo_func(env, drone_pos, goal, risk_weight=w,
@@ -394,7 +371,7 @@ def _compute_full_scenario(env, start, goal, algo_func, w, m, click_pos, grid_be
     result['replan_stats'] = replan_stats
     result['full_new_path'] = full_new
 
-    # ── KROK 6: Statystyki ───────────────────────────────────────────────
+    # Statystyki
     flown_path = clean_path[:react_idx + 1]
     flown_dist = calculate_path_length(flown_path)
     flown_time = calculate_kinematic_flight_time(flown_path, mass=m)
@@ -430,7 +407,6 @@ def _compute_full_scenario(env, start, goal, algo_func, w, m, click_pos, grid_be
 
 def _draw_scenario(result, ax, lc_flown_bg, lc_flown, line_reaction, drone_marker,
                    lc_new_bg, lc_new, line_global, algo_name, title_color, w, m):
-    """Rysuje wynik _compute_full_scenario na osi matplotlib."""
     a = MAX_THRUST_NET_N / m
     dr = drone_radius_for_mass(m)
     fmt = lambda v: f"+{v:.1f}" if v > 0 else f"{v:.1f}"
@@ -438,12 +414,10 @@ def _draw_scenario(result, ax, lc_flown_bg, lc_flown, line_reaction, drone_marke
 
     mode = result.get('mode', 'NO_PATH')
 
-    # Szara linia — trasa na czystej mapie
     if 'clean_path' in result:
         gx, gy = smooth_path_bspline(result['clean_path'])
         line_global.set_data(gx, gy)
 
-    # Wyczyść wszystko
     lc_flown_bg.set_segments([])
     lc_flown.set_segments([])
     line_reaction.set_data([], [])
@@ -457,7 +431,6 @@ def _draw_scenario(result, ax, lc_flown_bg, lc_flown, line_reaction, drone_marke
         return
 
     if mode == 'CLEAR':
-        # Trasa nie blokowana — pokaż pełną trasę z prędkościami
         cp = result['clean_path']
         cs = result['clean_speeds']
         sx, sy, ss = smooth_path_with_speeds(cp, cs, accel=a)
@@ -489,25 +462,21 @@ def _draw_scenario(result, ax, lc_flown_bg, lc_flown, line_reaction, drone_marke
                      color='red', fontsize=14, pad=25)
         return
 
-    # mode == 'NORMAL' or 'RTH' — rysuj pełny scenariusz omijania
     cp = result['clean_path']
     cs = result['clean_speeds']
     det_idx = result['detect_idx']
     react_idx = result['react_idx']
 
-    # Wygładź rozszerzoną trasę (droga + reakcja + lead-out)
     end_ext = min(react_idx + 1 + 2, len(cp))
     ext_path = cp[:end_ext]
     ext_speeds = cs[:end_ext]
     sx_ext, sy_ext, ss_ext = smooth_path_with_speeds(ext_path, ext_speeds, accel=a)
 
-    # Znajdź punkt detekcji i reakcji na wygładzonej krzywej
     det_px, det_py = cp[det_idx]
     idx_det = int(np.argmin((sx_ext - det_px) ** 2 + (sy_ext - det_py) ** 2))
     react_px, react_py = cp[react_idx]
     idx_react = int(np.argmin((sx_ext - react_px) ** 2 + (sy_ext - react_py) ** 2))
 
-    # Droga przebyta (start → detekcja) z kolorami prędkości
     if idx_det > 1:
         sx_g, sy_g, ss_g = sx_ext[:idx_det + 1], sy_ext[:idx_det + 1], ss_ext[:idx_det + 1]
         pts_g = np.array([sx_g, sy_g]).T.reshape(-1, 1, 2)
@@ -516,16 +485,13 @@ def _draw_scenario(result, ax, lc_flown_bg, lc_flown, line_reaction, drone_marke
         lc_flown.set_segments(segs_g)
         lc_flown.set_array((ss_g[:-1] + ss_g[1:]) / 2.0)
 
-    # Punkt wykrycia i linia reakcji (pomarańczowa przerywana)
     drone_marker.set_data([sx_ext[idx_det]], [sy_ext[idx_det]])
     line_reaction.set_data(sx_ext[idx_det:idx_react + 1], sy_ext[idx_det:idx_react + 1])
 
-    # Replanowana trasa z kolorami prędkości
     full_new = result['full_new_path']
     v_react_end = result['v_react_end']
     speeds_new = compute_path_speeds(full_new, initial_speed=v_react_end, accel=a)
 
-    # Lead-in dla płynnego sklejenia
     heading = result['heading']
     drone_pos = result['drone_pos']
     if heading != (0, 0) and len(full_new) >= 3:
@@ -535,7 +501,6 @@ def _draw_scenario(result, ax, lc_flown_bg, lc_flown, line_reaction, drone_marke
         lead_spd = np.full(2, v_react_end)
         combined_spd = np.concatenate([lead_spd, speeds_new])
         sx_n, sy_n, ss_n = smooth_path_with_speeds(combined, combined_spd, accel=a)
-        # Trim lead-in
         search_lim = min(len(sx_n), 60)
         dists = (sx_n[:search_lim] - react_px) ** 2 + (sy_n[:search_lim] - react_py) ** 2
         best = int(np.argmin(dists))
@@ -574,10 +539,6 @@ def _draw_scenario(result, ax, lc_flown_bg, lc_flown, line_reaction, drone_marke
 
 
 # Po kliknięciu przeszkody otwiera 3 okna:
-#   1. Risk-Aware A* (kinematyka) — hamuje, zwalnia, omija płynnie
-#   2. Dijkstra (brak kinematyki) — skręca 90° przy pełnej prędkości → rozpad
-#   3. A* Standard (brak kinematyki) — jak Dijkstra, ostry zakręt → rozpad
-# ─────────────────────────────────────────────────────────────────────────────
 def run_online_simulation(
         env: GridMap, start: Tuple[int, int], goal: Tuple[int, int],
         search_func: Callable, collision_radius: float,
@@ -586,8 +547,6 @@ def run_online_simulation(
 ) -> None:
     """
     Tryb online z porównaniem 3 algorytmów.
-    search_func = Risk-Aware A* (główny planista z kinematyką).
-    func_dijkstra, func_astar = algorytmy referencyjne (bez kinematyki).
     """
     path_global, stats_global = search_func(env, start, goal, risk_weight=RISK_WEIGHT,
                                             turn_penalty=TURN_PENALTY, drone_radius=collision_radius)
@@ -596,7 +555,6 @@ def run_online_simulation(
         print("Błąd: Nie znaleziono trasy startowej.")
         return
 
-    # ── OKNO GŁÓWNE: planowanie wstępne (Risk-Aware A*) ──────────────────
     fig, ax = plt.subplots(figsize=(12, 10))
     fig.canvas.manager.set_window_title("Risk-Aware A*")
     plt.subplots_adjust(bottom=0.18, right=0.80, left=0.15, top=0.90)
@@ -622,7 +580,6 @@ def run_online_simulation(
     initial_accel = MAX_THRUST_NET_N / DRONE_MASS_KG
     global_speeds = compute_path_speeds(path_global, accel=initial_accel)
 
-    # Trasa pierwotna (szara przerywana) — bez etykiety, legenda budowana ręcznie
     line_global, = ax.plot(gx_smooth, gy_smooth, color='gray', linestyle='--', linewidth=2.5, alpha=0.8)
 
     lc_flown_bg = LineCollection([], colors='#555555', linewidths=7, alpha=0.4, zorder=3)
@@ -674,7 +631,7 @@ def run_online_simulation(
     }
 
     def update_route(val):
-        # ── TRYB IDLE: przed kliknięciem ──────────────────────────────────
+        # TRYB IDLE: przed kliknięciem
         if sim_state["mode"] == "IDLE" and not sim_state["clicked"]:
             w = risk_slider.val
             m = mass_slider.val
@@ -707,7 +664,7 @@ def run_online_simulation(
             fig.canvas.draw_idle()
             return
 
-        # ── TRYB PO KLIKNIĘCIU: pełna symulacja ──────────────────────────
+        # TRYB PO KLIKNIĘCIU: pełna symulacja
         if sim_state.get("obstacle_pos") is None:
             return
 
@@ -723,7 +680,7 @@ def run_online_simulation(
         _draw_scenario(result, ax, lc_flown_bg, lc_flown, line_reaction, drone_marker,
                        lc_new_bg, lc_new, line_global, "Risk-Aware A*", 'lime', w, m)
 
-        # ── RAPORT METRYK HAMOWANIA: 3 algorytmy w terminalu ──────────────
+        # RAPORT METRYK
         if func_dijkstra is not None and func_astar is not None:
             result_dij = _compute_full_scenario(env, start, goal, func_dijkstra,
                                                 w, m, sim_state["obstacle_pos"],
@@ -760,10 +717,8 @@ def run_online_simulation(
 
         sim_state["clicked"] = True
 
-        # Pierwsze rysowanie Risk-Aware
         update_route(risk_slider.val)
 
-        # Otwórz okna Dijkstra i A*
         if func_dijkstra is not None and func_astar is not None:
             _open_comparison_windows(
                 env=env, start=start, goal=goal,
