@@ -215,7 +215,7 @@ class GridMap:
             region = self.grid[x_min:x_max, y_min:y_max]
             if np.any(region == 1.0):
                 continue
-
+            #1
             center_x = (x_min + x_max) / 2.0
             center_y = (y_min + y_max) / 2.0
             max_r = math.sqrt(((x_max - x_min) / 2.0) ** 2 + ((y_max - y_min) / 2.0) ** 2)
