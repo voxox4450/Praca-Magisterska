@@ -500,14 +500,11 @@ def base_search(
     }
 def sensor_range_for_mass(mass: float) -> float:
     """
-    Zasięg sensora [m] rośnie liniowo wraz z udźwigiem (lepszy sprzęt),
-    ale jest nasycany na wartości 60.0 m ze względu na typowe ograniczenia
-    widoczności w terenie zurbanizowanym (tzw. miejskie kaniony).
     - 1 kg  -> 16.5 m
     - 15 kg -> 37.5 m
     - >= 30 kg -> 60.0 m
     """
-    return min(60.0, 15.0 + 1.5 * mass)
+    return min(90.0, 15.0 + 1.5 * mass)
 
 def processing_delay_for_mass(mass: float) -> float:
     """
