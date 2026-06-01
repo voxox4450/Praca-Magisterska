@@ -34,16 +34,18 @@ Symulator lotu bezzałogowych statków powietrznych (UAV) realizujący oraz por�
 
 Projekt został przygotowany w strukturze modułowej, dlatego zaleca się uruchamianie go w dedykowanym środowisku programistycznym.
 
-### Sposób 1: Przez Terminal w IDE
+### Przez Terminal w IDE
 1. Otwórz swoje IDE (np. **PyCharm** lub **VS Code**).
 2. Otwórz wbudowany terminal i wklej poniższe polecenie, aby sklonować repozytorium:
-   ```bash
-   git clone [https://github.com/voxox4450/Praca-Magisterska.git](https://github.com/voxox4450/Praca-Magisterska.git)
+   git clone https://github.com/voxox4450/Praca-Magisterska.git
 ---
 ## Instalacja i przygotowanie środowiska
 
 Projekt wymaga środowiska **Python 3.10+**. 
 
-1. Zainstaluj wymagane pakiety za pomocą menedżera pakietów `pip`:
-   ```bash
+Zainstaluj wymagane pakiety za pomocą menedżera pakietów `pip`:
+
    pip install -r requirements.txt
+
+## Uruchomienie programu
+   python main.py
