@@ -12,9 +12,9 @@ Symulator lotu bezzałogowych statków powietrznych (UAV) realizujący oraz por�
 
 ---
 
-## 📂 Struktura projektu
+## Struktura projektu
 
-```text
+```
 ├── algorithms/          # Implementacje algorytmów (Dijkstra, A*, Risk-Aware A*)
 │   ├── common.py        # Funkcje pomocnicze, analizy ryzyka i czasu lotu
 │   ├── dijkstra.py      # Klasyczny algorytm Dijkstry
@@ -28,24 +28,25 @@ Symulator lotu bezzałogowych statków powietrznych (UAV) realizujący oraz por�
 ├── config.py            # Globalna konfiguracja fizyczna i algorytmiczna
 ├── requirements.txt     # Zależności biblioteczne projektu
 └── main.py              # Główny skrypt uruchomieniowy symulacji
----
-
-## 🔌 Importowanie projektu do IDE (PyCharm / VS Code)
-
+```
+Importowanie projektu do IDE (PyCharm / VS Code)
 Projekt został przygotowany w strukturze modułowej, dlatego zaleca się uruchamianie go w dedykowanym środowisku programistycznym.
 
-### Przez Terminal w IDE
-1. Otwórz swoje IDE (np. **PyCharm** lub **VS Code**).
-2. Otwórz wbudowany terminal i wklej poniższe polecenie, aby sklonować repozytorium:
+Przez Terminal w IDE
+Otwórz swoje IDE (np. PyCharm lub VS Code).
+
+Otwórz wbudowany terminal i wklej poniższe polecenie, aby sklonować repozytorium:
+
    git clone https://github.com/voxox4450/Praca-Magisterska.git
----
-## Instalacja i przygotowanie środowiska
+   
+Instalacja i przygotowanie środowiska 
 
-Projekt wymaga środowiska **Python 3.10+**. 
+Projekt wymaga środowiska Python 3.10+.
 
-Zainstaluj wymagane pakiety za pomocą menedżera pakietów `pip`:
+Zainstaluj wymagane pakiety za pomocą menedżera pakietów pip:
 
    pip install -r requirements.txt
 
-## Uruchomienie programu
+Uruchomienie programu
+
    python main.py
